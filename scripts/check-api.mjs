@@ -1,0 +1,36 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { createApp } from "../src/app.mjs";
+
+const approvedBundle = JSON.parse(readFileSync(resolve("examples/approved-bundle.example.json"), "utf8"));
+const app = createApp(approvedBundle);
+
+assertResponse("/legal-items", 200, (body) => Array.isArray(body.items) && body.items.length === 1);
+assertResponse("/legal-items/ar-law-example-001/overview", 200, (body) => body.id === "ar-law-example-001");
+assertResponse("/legal-items/ar-law-example-001/freshness", 200, (body) => body.status === "UPDATED");
+assertResponse("/search?q=ejemplo", 200, (body) => Array.isArray(body.items) && body.items.length === 1);
+assertResponse("/search?q=", 422, (body) => body.error === "MISSING_QUERY");
+assertResponse("/legal-items/missing/overview", 404, (body) => body.error === "LEGAL_ITEM_NOT_FOUND");
+
+console.log("API handler checks passed.");
+
+function assertResponse(url, expectedStatus, predicate) {
+  const response = app.handle({
+    method: "GET",
+    url
+  });
+
+  if (response.status !== expectedStatus) {
+    fail(`${url} expected ${expectedStatus}, got ${response.status}`);
+  }
+
+  if (!predicate(response.body)) {
+    fail(`${url} returned unexpected body: ${JSON.stringify(response.body)}`);
+  }
+}
+
+function fail(message) {
+  console.error(`API check failed: ${message}`);
+  process.exit(1);
+}
+

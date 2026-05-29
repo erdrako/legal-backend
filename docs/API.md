@@ -42,3 +42,29 @@ Toda respuesta interpretada debe incluir o permitir navegar hacia:
 - `422`: parametros invalidos.
 - `503`: read model no disponible temporalmente.
 
+## API local inicial
+
+El repositorio incluye una API minima sin dependencias externas:
+
+```bash
+npm start
+```
+
+Por defecto lee:
+
+```text
+examples/approved-bundle.example.json
+```
+
+Tambien puede leer otro approved bundle usando:
+
+```bash
+APPROVED_BUNDLE_PATH=path/to/approved-bundle.json npm start
+```
+
+Checks locales:
+
+```bash
+npm run check
+```
+

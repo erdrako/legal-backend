@@ -1,0 +1,85 @@
+{
+  "schemaVersion": "0.1.0",
+  "approvedAt": "2026-05-29T00:00:00.000Z",
+  "approvedBy": "lexmapa-seed",
+  "legalItems": [
+    {
+      "id": "ar-law-example-001",
+      "type": "LAW",
+      "title": "Norma argentina de ejemplo",
+      "status": "DESCONOCIDO",
+      "jurisdiction": {
+        "country": "AR",
+        "level": "NATIONAL"
+      },
+      "source": {
+        "id": "infoleg",
+        "name": "InfoLEG",
+        "sourceUrl": "https://www.argentina.gob.ar/normativa",
+        "retrievedAt": "2026-05-29T00:00:00.000Z",
+        "official": true
+      },
+      "summaryPlainLanguage": "Item legal de ejemplo aprobado para validar el backend."
+    }
+  ],
+  "provisions": [
+    {
+      "id": "ar-law-example-001-art-1",
+      "legalItemId": "ar-law-example-001",
+      "type": "ARTICLE",
+      "label": "Articulo 1",
+      "order": 1,
+      "textOriginal": "Texto de ejemplo del articulo 1.",
+      "textCurrent": "Texto de ejemplo del articulo 1.",
+      "status": "DESCONOCIDO"
+    }
+  ],
+  "citations": [
+    {
+      "id": "citation-example-001",
+      "sourceLegalItemId": "ar-law-example-001",
+      "provisionId": "ar-law-example-001-art-1",
+      "article": "1",
+      "originalText": "Texto de ejemplo del articulo 1.",
+      "sourceUrl": "https://www.argentina.gob.ar/normativa",
+      "retrievedAt": "2026-05-29T00:00:00.000Z"
+    }
+  ],
+  "relationships": [],
+  "rules": [],
+  "concepts": [],
+  "snapshots": [],
+  "readModels": {
+    "legalItemOverviews": [
+      {
+        "id": "ar-law-example-001",
+        "title": "Norma argentina de ejemplo",
+        "type": "LAW",
+        "status": "DESCONOCIDO",
+        "summaryPlainLanguage": "Item legal de ejemplo aprobado para validar el backend.",
+        "affectedSubjects": [],
+        "currentEffects": {
+          "obligations": 0,
+          "prohibitions": 0,
+          "rights": 0,
+          "sanctions": 0
+        },
+        "relationshipsSummary": {
+          "modifications": 0,
+          "regulations": 0,
+          "caseLaw": 0,
+          "doctrine": 0,
+          "administrativeCriteria": 0,
+          "pendingBills": 0
+        },
+        "freshness": {
+          "status": "UPDATED",
+          "lastValidatedAt": "2026-05-29T00:00:00.000Z",
+          "lastSourceCheckedAt": "2026-05-29T00:00:00.000Z",
+          "pendingValidationCount": 0
+        }
+      }
+    ]
+  }
+}
+

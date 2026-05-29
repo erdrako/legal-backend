@@ -1,0 +1,12 @@
+{
+  "name": "@lexmapa/backend",
+  "version": "0.1.0",
+  "description": "API de consulta sobre datos legales aprobados de LexMapa.",
+  "type": "module",
+  "private": false,
+  "scripts": {
+    "start": "node src/server.mjs",
+    "check": "node scripts/check-api.mjs"
+  }
+}
+
