@@ -6,6 +6,7 @@ const approvedBundle = JSON.parse(readFileSync(resolve("examples/approved-bundle
 const app = createApp(approvedBundle);
 
 assertResponse("/legal-items", 200, (body) => Array.isArray(body.items) && body.items.length === 1);
+assertResponse("/dataset/status", 200, (body) => body.counts.legalItems === 1);
 assertResponse("/legal-items/ar-law-example-001/overview", 200, (body) => body.id === "ar-law-example-001");
 assertResponse("/legal-items/ar-law-example-001/freshness", 200, (body) => body.status === "UPDATED");
 assertResponse("/search?q=ejemplo", 200, (body) => Array.isArray(body.items) && body.items.length === 1);
@@ -33,4 +34,3 @@ function fail(message) {
   console.error(`API check failed: ${message}`);
   process.exit(1);
 }
-

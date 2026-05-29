@@ -14,7 +14,14 @@ export function createApp(approvedBundle) {
       }
 
       if (url.pathname === "/legal-items") {
-        return json(200, { items: [...overviewById.values()] });
+        return json(200, {
+          dataset: datasetStatusFor(approvedBundle),
+          items: [...overviewById.values()]
+        });
+      }
+
+      if (url.pathname === "/dataset/status") {
+        return json(200, datasetStatusFor(approvedBundle));
       }
 
       if (url.pathname === "/search") {
@@ -63,6 +70,30 @@ export function createApp(approvedBundle) {
   };
 }
 
+function datasetStatusFor(approvedBundle) {
+  const dataset = approvedBundle.dataset ?? {
+    mode: "HUMAN_REVIEWED",
+    generatedAt: approvedBundle.approvedAt,
+    disposable: false
+  };
+
+  return {
+    ...dataset,
+    approvedAt: approvedBundle.approvedAt,
+    approvedBy: approvedBundle.approvedBy,
+    counts: {
+      legalItems: approvedBundle.legalItems?.length ?? 0,
+      provisions: approvedBundle.provisions?.length ?? 0,
+      citations: approvedBundle.citations?.length ?? 0,
+      relationships: approvedBundle.relationships?.length ?? 0,
+      rules: approvedBundle.rules?.length ?? 0,
+      concepts: approvedBundle.concepts?.length ?? 0,
+      snapshots: approvedBundle.snapshots?.length ?? 0
+    },
+    validationSummary: approvedBundle.validationSummary
+  };
+}
+
 function validateApprovedBundle(bundle) {
   assertObject(bundle, "approvedBundle");
   assertObject(bundle.readModels, "approvedBundle.readModels");
@@ -73,6 +104,7 @@ function json(status, body) {
   return {
     status,
     headers: {
+      "access-control-allow-origin": "*",
       "content-type": "application/json; charset=utf-8"
     },
     body
@@ -88,4 +120,3 @@ function assert(condition, message) {
     throw new Error(message);
   }
 }
-

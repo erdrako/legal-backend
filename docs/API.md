@@ -11,6 +11,7 @@ GET /legal-items/:id/relationships
 GET /legal-items/:id/timeline
 GET /legal-items/:id/semantic-diff?from=&to=
 GET /legal-items/:id/freshness
+GET /dataset/status
 ```
 
 ## Conceptos
@@ -67,4 +68,3 @@ Checks locales:
 ```bash
 npm run check
 ```
-

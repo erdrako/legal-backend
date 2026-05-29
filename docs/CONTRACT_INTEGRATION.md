@@ -37,6 +37,7 @@ GET /legal-items
 GET /legal-items/:id/overview
 GET /legal-items/:id/freshness
 GET /search?q=
+GET /dataset/status
 ```
 
 ## Regla de trazabilidad
@@ -48,4 +49,3 @@ Toda respuesta interpretada debe permitir navegar hacia:
 - Estado de revision.
 - Confianza.
 - Fecha de validacion.
-
