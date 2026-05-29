@@ -30,8 +30,8 @@ No puede:
 - [Arquitectura](./docs/ARCHITECTURE.md)
 - [API inicial](./docs/API.md)
 - [Modelo de lectura](./docs/READ_MODELS.md)
+- [Integracion con contratos](./docs/CONTRACT_INTEGRATION.md)
 
 ## Principio de producto
 
 El backend debe responder rapido con datos aprobados y estado de actualizacion. Si un dato esta desactualizado o pendiente de validacion, debe informarlo de forma explicita.
-
