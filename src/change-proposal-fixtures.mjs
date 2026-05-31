@@ -6,7 +6,15 @@ const fixtureSource = {
   official: false
 };
 
-function version(id, label, legalItemTitle, provisionLabel, text, status) {
+function pendingOriginalSource(label) {
+  return {
+    status: "PENDING",
+    label,
+    note: "Fuente original pendiente de carga"
+  };
+}
+
+function version(id, label, legalItemTitle, provisionLabel, text, status, originalLabel) {
   return {
     id,
     label,
@@ -14,7 +22,9 @@ function version(id, label, legalItemTitle, provisionLabel, text, status) {
     provisionLabel,
     text,
     status,
-    source: fixtureSource
+    source: fixtureSource,
+    sourceStatus: "PENDING",
+    originalSource: pendingOriginalSource(originalLabel)
   };
 }
 
@@ -32,7 +42,8 @@ function diff(id, title, changeType, affectedTopicIds, affectedGroupIds, current
       "Regimen laboral vigente - ejemplo",
       "Articulo o regla actual de ejemplo",
       currentText,
-      "VIGENTE"
+      "VIGENTE",
+      "Texto vigente original"
     ),
     proposedVersion: version(
       `${id}-propuesto`,
@@ -40,7 +51,8 @@ function diff(id, title, changeType, affectedTopicIds, affectedGroupIds, current
       "Reforma laboral - ejemplo",
       "Articulo o regla propuesta de ejemplo",
       proposedText,
-      "PROPOSED"
+      "PROPOSED",
+      "Texto propuesto original"
     ),
     explanationPlainLanguage,
     practicalImpact,
@@ -61,6 +73,7 @@ export const changeProposalBundle = {
       id: "reforma-laboral-mvp-2026",
       title: "Reforma laboral - ejemplo acotado para MVP",
       status: "IN_DEBATE",
+      typeOfChange: "Reforma propuesta",
       jurisdiction: {
         country: "AR",
         level: "NATIONAL"
@@ -209,6 +222,10 @@ export const changeProposalBundle = {
         "que cambia para las pymes"
       ],
       source: fixtureSource,
+      originalSources: {
+        current: pendingOriginalSource("Texto vigente original"),
+        proposed: pendingOriginalSource("Texto propuesto original")
+      },
       dataStatus: "MANUAL_FIXTURE",
       createdAt: "2026-05-31T00:00:00.000Z",
       updatedAt: "2026-05-31T00:00:00.000Z",
