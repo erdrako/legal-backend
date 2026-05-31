@@ -6,7 +6,6 @@
   "private": false,
   "scripts": {
     "start": "node src/server.mjs",
-    "check": "node scripts/check-api.mjs"
+    "check": "node scripts/check-api.mjs && node scripts/check-worker.mjs"
   }
 }
-

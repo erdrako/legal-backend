@@ -68,3 +68,19 @@ Checks locales:
 ```bash
 npm run check
 ```
+
+## Worker Cloudflare
+
+El entrypoint para Cloudflare Workers es:
+
+```text
+src/worker.mjs
+```
+
+En produccion espera un binding D1 llamado:
+
+```text
+DB
+```
+
+Si el binding no existe, responde `503 D1_BINDING_MISSING`.
