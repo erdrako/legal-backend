@@ -1,15 +1,11 @@
-export function createD1App(env) {
-  if (!env?.DB) {
-    return {
-      async handle() {
-        return json(503, {
-          error: "D1_BINDING_MISSING",
-          message: "Cloudflare D1 binding DB is required."
-        });
-      }
-    };
-  }
+import {
+  getProposal,
+  getProposalDiffs,
+  listProposalOverviews,
+  searchProposalOverviews
+} from "./change-proposals.mjs";
 
+export function createD1App(env) {
   return {
     async handle(request) {
       const url = new URL(request.url);
@@ -20,6 +16,87 @@ export function createD1App(env) {
 
       if (request.method !== "GET") {
         return json(405, { error: "METHOD_NOT_ALLOWED" });
+      }
+
+      if (url.pathname === "/change-proposals") {
+        return json(200, {
+          proposals: listProposalOverviews()
+        });
+      }
+
+      const proposalMatch = url.pathname.match(/^\/change-proposals\/([^/]+)$/);
+      if (proposalMatch) {
+        const proposal = getProposal(decodeURIComponent(proposalMatch[1]));
+
+        if (!proposal) {
+          return json(404, { error: "CHANGE_PROPOSAL_NOT_FOUND" });
+        }
+
+        return json(200, proposal);
+      }
+
+      const proposalDiffsMatch = url.pathname.match(/^\/change-proposals\/([^/]+)\/diffs$/);
+      if (proposalDiffsMatch) {
+        const proposalId = decodeURIComponent(proposalDiffsMatch[1]);
+        const diffs = getProposalDiffs(proposalId);
+
+        if (!diffs) {
+          return json(404, { error: "CHANGE_PROPOSAL_NOT_FOUND" });
+        }
+
+        return json(200, { proposalId, diffs });
+      }
+
+      if (url.pathname === "/search") {
+        const query = (url.searchParams.get("q") ?? "").trim();
+
+        if (!query) {
+          return json(422, { error: "MISSING_QUERY" });
+        }
+
+        const proposals = searchProposalOverviews(query);
+
+        if (!env?.DB) {
+          return json(200, {
+            query,
+            proposals,
+            items: [],
+            itemsUnavailable: {
+              error: "D1_BINDING_MISSING",
+              message: "Cloudflare D1 binding DB is required for legal item search."
+            }
+          });
+        }
+
+        const dataset = await datasetStatus(env.DB);
+        const policy = datasetServingPolicy(env, dataset);
+
+        if (!policy.canServePublicRead) {
+          return json(200, {
+            query,
+            proposals,
+            items: [],
+            itemsUnavailable: {
+              error: "DATASET_NOT_APPROVED",
+              dataset: {
+                mode: dataset.mode,
+                disposable: Boolean(dataset.disposable),
+                warning: dataset.warning
+              },
+              servingPolicy: policy
+            }
+          });
+        }
+
+        return json(200, {
+          query,
+          proposals,
+          items: await searchOverviews(env.DB, query)
+        });
+      }
+
+      if (!env?.DB) {
+        return d1BindingMissing();
       }
 
       if (url.pathname === "/dataset/status") {
@@ -42,25 +119,6 @@ export function createD1App(env) {
         const items = await listOverviews(env.DB);
 
         return json(200, { dataset, items });
-      }
-
-      if (url.pathname === "/search") {
-        const query = (url.searchParams.get("q") ?? "").trim();
-
-        if (!query) {
-          return json(422, { error: "MISSING_QUERY" });
-        }
-
-        const dataset = await datasetStatus(env.DB);
-        const guard = guardDatasetForPublicRead(env, dataset);
-
-        if (guard) {
-          return guard;
-        }
-
-        return json(200, {
-          items: await searchOverviews(env.DB, query)
-        });
       }
 
       const overviewMatch = url.pathname.match(/^\/legal-items\/([^/]+)\/overview$/);
@@ -102,6 +160,13 @@ export function createD1App(env) {
       return json(404, { error: "NOT_FOUND" });
     }
   };
+}
+
+function d1BindingMissing() {
+  return json(503, {
+    error: "D1_BINDING_MISSING",
+    message: "Cloudflare D1 binding DB is required."
+  });
 }
 
 function guardDatasetForPublicRead(env, dataset) {

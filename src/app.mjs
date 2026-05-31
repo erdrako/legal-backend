@@ -1,3 +1,10 @@
+import {
+  getProposal,
+  getProposalDiffs,
+  listProposalOverviews,
+  searchProposalOverviews
+} from "./change-proposals.mjs";
+
 export function createApp(approvedBundle) {
   validateApprovedBundle(approvedBundle);
 
@@ -11,6 +18,35 @@ export function createApp(approvedBundle) {
 
       if (request.method !== "GET") {
         return json(405, { error: "METHOD_NOT_ALLOWED" });
+      }
+
+      if (url.pathname === "/change-proposals") {
+        return json(200, {
+          proposals: listProposalOverviews()
+        });
+      }
+
+      const proposalMatch = url.pathname.match(/^\/change-proposals\/([^/]+)$/);
+      if (proposalMatch) {
+        const proposal = getProposal(decodeURIComponent(proposalMatch[1]));
+
+        if (!proposal) {
+          return json(404, { error: "CHANGE_PROPOSAL_NOT_FOUND" });
+        }
+
+        return json(200, proposal);
+      }
+
+      const proposalDiffsMatch = url.pathname.match(/^\/change-proposals\/([^/]+)\/diffs$/);
+      if (proposalDiffsMatch) {
+        const proposalId = decodeURIComponent(proposalDiffsMatch[1]);
+        const diffs = getProposalDiffs(proposalId);
+
+        if (!diffs) {
+          return json(404, { error: "CHANGE_PROPOSAL_NOT_FOUND" });
+        }
+
+        return json(200, { proposalId, diffs });
       }
 
       if (url.pathname === "/legal-items") {
@@ -38,7 +74,11 @@ export function createApp(approvedBundle) {
             .includes(query)
         );
 
-        return json(200, { items });
+        return json(200, {
+          query,
+          proposals: searchProposalOverviews(query),
+          items
+        });
       }
 
       const overviewMatch = url.pathname.match(/^\/legal-items\/([^/]+)\/overview$/);

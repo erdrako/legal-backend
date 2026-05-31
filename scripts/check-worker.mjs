@@ -58,11 +58,30 @@ const blockedApp = createD1App({
 
 await assertResponse(app, "/dataset/status", 200, async (body) => body.mode === "DEV_STRUCTURAL" && body.servingPolicy.allowsDevelopmentDataset);
 await assertResponse(blockedApp, "/legal-items", 409, async (body) => body.error === "DATASET_NOT_APPROVED");
+await assertResponse("/change-proposals", 200, async (body) => body.proposals[0]?.id === "reforma-laboral-mvp-2026");
+await assertResponse(
+  "/change-proposals/reforma-laboral-mvp-2026",
+  200,
+  async (body) => body.id === "reforma-laboral-mvp-2026" && body.diffs.length === 5
+);
+await assertResponse(
+  "/change-proposals/reforma-laboral-mvp-2026/diffs",
+  200,
+  async (body) => body.proposalId === "reforma-laboral-mvp-2026" && body.diffs.length === 5
+);
+await assertResponse(
+  blockedApp,
+  "/search?q=reforma%20laboral",
+  200,
+  async (body) => body.proposals.length === 1 && body.items.length === 0 && body.itemsUnavailable.error === "DATASET_NOT_APPROVED"
+);
 await assertResponse("/legal-items", 200, async (body) => body.items.length === 1 && body.dataset.counts.legalItems === 1);
 await assertResponse("/legal-items/ar-law-example-001/overview", 200, async (body) => body.id === overview.id);
 await assertResponse("/legal-items/ar-law-example-001/freshness", 200, async (body) => body.status === "UPDATED");
+await assertResponse("/search?q=reforma%20laboral", 200, async (body) => body.proposals.length === 1);
 await assertResponse("/search?q=ejemplo", 200, async (body) => body.items.length === 1);
 await assertResponse("/legal-items/missing/overview", 404, async (body) => body.error === "LEGAL_ITEM_NOT_FOUND");
+await assertResponse("/change-proposals/missing", 404, async (body) => body.error === "CHANGE_PROPOSAL_NOT_FOUND");
 
 console.log("Worker D1 checks passed.");
 

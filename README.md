@@ -4,10 +4,13 @@ Repositorio publico para la API de consulta de LexMapa.
 
 ## Responsabilidad
 
-`legal-backend` expone datos legales aprobados al frontend y a consumidores autorizados.
+`legal-backend` expone propuestas de cambio legal, diffs explicables y datos legales aprobados al frontend.
 
 Puede:
 
+- Buscar propuestas o reformas en lenguaje simple.
+- Consultar una propuesta de cambio legal.
+- Consultar diffs texto actual vs texto propuesto.
 - Buscar items legales.
 - Consultar fichas.
 - Consultar disposiciones.
@@ -34,4 +37,18 @@ No puede:
 
 ## Principio de producto
 
-El backend debe responder rapido con datos aprobados y estado de actualizacion. Si un dato esta desactualizado o pendiente de validacion, debe informarlo de forma explicita.
+El backend debe responder rapido con comparaciones comprensibles y trazables. Si un dato esta desactualizado, es fixture o esta pendiente de validacion, debe informarlo de forma explicita.
+
+## MVP actual
+
+Endpoints disponibles para la primera experiencia de comparacion legal:
+
+```http
+GET /change-proposals
+GET /change-proposals/:id
+GET /change-proposals/:id/diffs
+GET /search?q=
+```
+
+El fixture actual es `reforma-laboral-mvp-2026`, con cinco cambios de ejemplo.
+Sirve para demostrar UX; no es asesoramiento legal ni dato productivo revisado.
