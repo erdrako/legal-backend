@@ -42,13 +42,22 @@ const dataset = {
 };
 
 const app = createD1App({
+  ALLOW_DEV_STRUCTURAL_DATASET: "true",
   DB: fakeD1({
     dataset,
     overviews: [overview]
   })
 });
 
-await assertResponse("/dataset/status", 200, async (body) => body.mode === "DEV_STRUCTURAL");
+const blockedApp = createD1App({
+  DB: fakeD1({
+    dataset,
+    overviews: [overview]
+  })
+});
+
+await assertResponse(app, "/dataset/status", 200, async (body) => body.mode === "DEV_STRUCTURAL" && body.servingPolicy.allowsDevelopmentDataset);
+await assertResponse(blockedApp, "/legal-items", 409, async (body) => body.error === "DATASET_NOT_APPROVED");
 await assertResponse("/legal-items", 200, async (body) => body.items.length === 1 && body.dataset.counts.legalItems === 1);
 await assertResponse("/legal-items/ar-law-example-001/overview", 200, async (body) => body.id === overview.id);
 await assertResponse("/legal-items/ar-law-example-001/freshness", 200, async (body) => body.status === "UPDATED");
@@ -57,8 +66,12 @@ await assertResponse("/legal-items/missing/overview", 404, async (body) => body.
 
 console.log("Worker D1 checks passed.");
 
-async function assertResponse(path, expectedStatus, predicate) {
-  const response = await app.handle(new Request(`https://api.example.test${path}`));
+async function assertResponse(appOrPath, pathOrStatus, statusOrPredicate, maybePredicate) {
+  const appUnderTest = typeof appOrPath === "string" ? app : appOrPath;
+  const path = typeof appOrPath === "string" ? appOrPath : pathOrStatus;
+  const expectedStatus = typeof appOrPath === "string" ? pathOrStatus : statusOrPredicate;
+  const predicate = typeof appOrPath === "string" ? statusOrPredicate : maybePredicate;
+  const response = await appUnderTest.handle(new Request(`https://api.example.test${path}`));
   const body = await response.json();
 
   if (response.status !== expectedStatus) {
@@ -117,4 +130,3 @@ function fail(message) {
   console.error(`Worker check failed: ${message}`);
   process.exit(1);
 }
-

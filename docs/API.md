@@ -84,3 +84,29 @@ DB
 ```
 
 Si el binding no existe, responde `503 D1_BINDING_MISSING`.
+
+### Politica de dataset
+
+Los endpoints de lectura publica (`/legal-items`, `/search`,
+`/legal-items/:id/overview` y `/legal-items/:id/freshness`) solo sirven datasets
+con:
+
+```text
+dataset.mode = HUMAN_REVIEWED
+dataset.mode = PRODUCTION_APPROVED
+```
+
+Si D1 contiene un dataset `DEV_STRUCTURAL` o `disposable = true`, responden:
+
+```http
+409 DATASET_NOT_APPROVED
+```
+
+Para una preview tecnica puede declararse explicitamente:
+
+```text
+ALLOW_DEV_STRUCTURAL_DATASET=true
+```
+
+Ese override permite validar infraestructura, pero no debe usarse como estado
+productivo legal aprobado.

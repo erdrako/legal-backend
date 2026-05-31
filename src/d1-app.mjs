@@ -23,14 +23,23 @@ export function createD1App(env) {
       }
 
       if (url.pathname === "/dataset/status") {
-        return json(200, await datasetStatus(env.DB));
+        const dataset = await datasetStatus(env.DB);
+
+        return json(200, {
+          ...dataset,
+          servingPolicy: datasetServingPolicy(env, dataset)
+        });
       }
 
       if (url.pathname === "/legal-items") {
-        const [dataset, items] = await Promise.all([
-          datasetStatus(env.DB),
-          listOverviews(env.DB)
-        ]);
+        const dataset = await datasetStatus(env.DB);
+        const guard = guardDatasetForPublicRead(env, dataset);
+
+        if (guard) {
+          return guard;
+        }
+
+        const items = await listOverviews(env.DB);
 
         return json(200, { dataset, items });
       }
@@ -42,6 +51,13 @@ export function createD1App(env) {
           return json(422, { error: "MISSING_QUERY" });
         }
 
+        const dataset = await datasetStatus(env.DB);
+        const guard = guardDatasetForPublicRead(env, dataset);
+
+        if (guard) {
+          return guard;
+        }
+
         return json(200, {
           items: await searchOverviews(env.DB, query)
         });
@@ -49,6 +65,13 @@ export function createD1App(env) {
 
       const overviewMatch = url.pathname.match(/^\/legal-items\/([^/]+)\/overview$/);
       if (overviewMatch) {
+        const dataset = await datasetStatus(env.DB);
+        const guard = guardDatasetForPublicRead(env, dataset);
+
+        if (guard) {
+          return guard;
+        }
+
         const overview = await getOverview(env.DB, decodeURIComponent(overviewMatch[1]));
 
         if (!overview) {
@@ -60,6 +83,13 @@ export function createD1App(env) {
 
       const freshnessMatch = url.pathname.match(/^\/legal-items\/([^/]+)\/freshness$/);
       if (freshnessMatch) {
+        const dataset = await datasetStatus(env.DB);
+        const guard = guardDatasetForPublicRead(env, dataset);
+
+        if (guard) {
+          return guard;
+        }
+
         const overview = await getOverview(env.DB, decodeURIComponent(freshnessMatch[1]));
 
         if (!overview) {
@@ -71,6 +101,43 @@ export function createD1App(env) {
 
       return json(404, { error: "NOT_FOUND" });
     }
+  };
+}
+
+function guardDatasetForPublicRead(env, dataset) {
+  const policy = datasetServingPolicy(env, dataset);
+
+  if (policy.canServePublicRead) {
+    return undefined;
+  }
+
+  return json(409, {
+    error: "DATASET_NOT_APPROVED",
+    message: "This dataset is not approved for public read models.",
+    dataset: {
+      mode: dataset.mode,
+      disposable: Boolean(dataset.disposable),
+      warning: dataset.warning
+    },
+    servingPolicy: policy
+  });
+}
+
+function datasetServingPolicy(env, dataset) {
+  const mode = dataset.mode ?? "UNKNOWN";
+  const isApprovedMode = mode === "HUMAN_REVIEWED" || mode === "PRODUCTION_APPROVED";
+  const isDevelopmentDataset = mode === "DEV_STRUCTURAL" || dataset.disposable === true;
+  const allowsDevelopmentDataset = env?.ALLOW_DEV_STRUCTURAL_DATASET === "true";
+
+  return {
+    canServePublicRead: isApprovedMode || (isDevelopmentDataset && allowsDevelopmentDataset),
+    requiresApprovedDataset: !allowsDevelopmentDataset,
+    allowsDevelopmentDataset,
+    reason: isApprovedMode
+      ? "APPROVED_DATASET"
+      : isDevelopmentDataset && allowsDevelopmentDataset
+        ? "TECHNICAL_PREVIEW_OVERRIDE"
+        : "DEVELOPMENT_DATASET_BLOCKED"
   };
 }
 
@@ -148,4 +215,3 @@ function json(status, body) {
     }
   });
 }
-
