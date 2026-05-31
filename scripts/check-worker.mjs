@@ -73,12 +73,23 @@ await assertResponse(
   blockedApp,
   "/search?q=reforma%20laboral",
   200,
-  async (body) => body.proposals.length === 1 && body.items.length === 0 && body.itemsUnavailable.error === "DATASET_NOT_APPROVED"
+  async (body) =>
+    body.proposals.length === 1 &&
+    Array.isArray(body.proposals[0].matchedDiffIds) &&
+    body.items.length === 0 &&
+    body.itemsUnavailable.error === "DATASET_NOT_APPROVED"
 );
 await assertResponse("/legal-items", 200, async (body) => body.items.length === 1 && body.dataset.counts.legalItems === 1);
 await assertResponse("/legal-items/ar-law-example-001/overview", 200, async (body) => body.id === overview.id);
 await assertResponse("/legal-items/ar-law-example-001/freshness", 200, async (body) => body.status === "UPDATED");
 await assertResponse("/search?q=reforma%20laboral", 200, async (body) => body.proposals.length === 1);
+await assertResponse(
+  "/search?q=periodo%20de%20prueba",
+  200,
+  async (body) =>
+    body.proposals[0]?.matchedDiffIds.includes("rl-mvp-periodo-prueba") &&
+    body.proposals[0]?.matchedTopicIds.includes("periodo-de-prueba")
+);
 await assertResponse("/search?q=ejemplo", 200, async (body) => body.items.length === 1);
 await assertResponse("/legal-items/missing/overview", 404, async (body) => body.error === "LEGAL_ITEM_NOT_FOUND");
 await assertResponse("/change-proposals/missing", 404, async (body) => body.error === "CHANGE_PROPOSAL_NOT_FOUND");

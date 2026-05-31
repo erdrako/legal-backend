@@ -58,7 +58,9 @@ GET /search?q=
 
 La busqueda devuelve:
 
-- `proposals`: propuestas o reformas que coinciden con la pregunta.
+- `proposals`: propuestas o reformas que coinciden con la pregunta. Para cada
+  resultado incluye `matchedDiffIds`, `matchedTopicIds`, `matchedGroupIds` y
+  `matchSummary` cuando la pregunta permite orientar el resultado.
 - `items`: items legales aprobados disponibles, si el dataset permite lectura.
 
 En Worker, si D1 contiene un dataset bloqueado para lectura publica, la busqueda

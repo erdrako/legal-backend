@@ -9,6 +9,7 @@ Repositorio publico para la API de consulta de LexMapa.
 Puede:
 
 - Buscar propuestas o reformas en lenguaje simple.
+- Indicar que diffs, temas o grupos coinciden con una pregunta simple.
 - Consultar una propuesta de cambio legal.
 - Consultar diffs texto actual vs texto propuesto.
 - Buscar items legales.
@@ -52,3 +53,6 @@ GET /search?q=
 
 El fixture actual es `reforma-laboral-mvp-2026`, con cinco cambios de ejemplo.
 Sirve para demostrar UX; no es asesoramiento legal ni dato productivo revisado.
+La busqueda devuelve metadatos de coincidencia para que el frontend pueda
+resaltar cambios concretos ante preguntas como `indemnizaciones` o
+`que cambia para los trabajadores`.

@@ -23,7 +23,25 @@ assertResponse("/legal-items/ar-law-example-001/freshness", 200, (body) => body.
 assertResponse(
   "/search?q=reforma%20laboral",
   200,
-  (body) => Array.isArray(body.proposals) && body.proposals[0]?.id === "reforma-laboral-mvp-2026"
+  (body) =>
+    Array.isArray(body.proposals) &&
+    body.proposals[0]?.id === "reforma-laboral-mvp-2026" &&
+    Array.isArray(body.proposals[0].matchedDiffIds)
+);
+assertResponse(
+  "/search?q=indemnizaciones",
+  200,
+  (body) =>
+    body.proposals[0]?.matchedDiffIds.includes("rl-mvp-indemnizacion") &&
+    body.proposals[0]?.matchedTopicIds.includes("indemnizaciones")
+);
+assertResponse(
+  "/search?q=que%20cambia%20para%20los%20trabajadores",
+  200,
+  (body) =>
+    body.proposals[0]?.matchedGroupIds.includes("trabajadores") &&
+    body.proposals[0]?.matchedDiffIds.length >= 3 &&
+    body.proposals[0]?.matchSummary.includes("Trabajadores")
 );
 assertResponse("/search?q=ejemplo", 200, (body) => Array.isArray(body.items) && body.items.length === 1);
 assertResponse("/search?q=", 422, (body) => body.error === "MISSING_QUERY");
