@@ -58,23 +58,23 @@ const blockedApp = createD1App({
 
 await assertResponse(app, "/dataset/status", 200, async (body) => body.mode === "DEV_STRUCTURAL" && body.servingPolicy.allowsDevelopmentDataset);
 await assertResponse(blockedApp, "/legal-items", 409, async (body) => body.error === "DATASET_NOT_APPROVED");
-await assertResponse("/change-proposals", 200, async (body) => body.proposals[0]?.id === "reforma-laboral-mvp-2026");
+await assertResponse("/change-proposals", 200, async (body) => body.proposals.length === 8 && body.proposals[0]?.id === "ley-hojarasca");
 await assertResponse(
-  "/change-proposals/reforma-laboral-mvp-2026",
+  "/change-proposals/ley-hojarasca",
   200,
-  async (body) => body.id === "reforma-laboral-mvp-2026" && body.diffs.length === 5
+  async (body) => body.id === "ley-hojarasca" && body.diffs.length === 0 && body.dataKind === "REAL_AGENDA_ITEM"
 );
 await assertResponse(
-  "/change-proposals/reforma-laboral-mvp-2026/diffs",
+  "/change-proposals/ley-hojarasca/diffs",
   200,
-  async (body) => body.proposalId === "reforma-laboral-mvp-2026" && body.diffs.length === 5
+  async (body) => body.proposalId === "ley-hojarasca" && body.diffs.length === 0
 );
 await assertResponse(
   blockedApp,
-  "/search?q=reforma%20laboral",
+  "/search?q=biocombustibles",
   200,
   async (body) =>
-    body.proposals.length === 1 &&
+    body.proposals[0]?.id === "biocombustibles" &&
     Array.isArray(body.proposals[0].matchedDiffIds) &&
     body.items.length === 0 &&
     body.itemsUnavailable.error === "DATASET_NOT_APPROVED"
@@ -82,13 +82,13 @@ await assertResponse(
 await assertResponse("/legal-items", 200, async (body) => body.items.length === 1 && body.dataset.counts.legalItems === 1);
 await assertResponse("/legal-items/ar-law-example-001/overview", 200, async (body) => body.id === overview.id);
 await assertResponse("/legal-items/ar-law-example-001/freshness", 200, async (body) => body.status === "UPDATED");
-await assertResponse("/search?q=reforma%20laboral", 200, async (body) => body.proposals.length === 1);
+await assertResponse("/search?q=transparencia", 200, async (body) => body.proposals[0]?.id === "transparencia-gestion-intereses");
 await assertResponse(
-  "/search?q=periodo%20de%20prueba",
+  "/search?q=seguridad%20social",
   200,
   async (body) =>
-    body.proposals[0]?.matchedDiffIds.includes("rl-mvp-periodo-prueba") &&
-    body.proposals[0]?.matchedTopicIds.includes("periodo-de-prueba")
+    body.proposals[0]?.id === "convenios-seguridad-social-suiza-san-marino" &&
+    body.proposals[0]?.matchedTopicIds.includes("seguridad-social")
 );
 await assertResponse("/search?q=ejemplo", 200, async (body) => body.items.length === 1);
 await assertResponse("/legal-items/missing/overview", 404, async (body) => body.error === "LEGAL_ITEM_NOT_FOUND");

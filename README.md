@@ -4,14 +4,14 @@ Repositorio publico para la API de consulta de LexMapa.
 
 ## Responsabilidad
 
-`legal-backend` expone propuestas de cambio legal, diffs explicables y datos legales aprobados al frontend.
+`legal-backend` expone propuestas de cambio legal en debate, diffs explicables cuando estan cargados y datos legales aprobados al frontend.
 
 Puede:
 
 - Buscar propuestas o reformas en lenguaje simple.
 - Indicar que diffs, temas o grupos coinciden con una pregunta simple.
 - Consultar una propuesta de cambio legal.
-- Consultar diffs texto actual vs texto propuesto.
+- Consultar diffs texto actual vs texto propuesto cuando existen.
 - Buscar items legales.
 - Consultar fichas.
 - Consultar disposiciones.
@@ -51,8 +51,13 @@ GET /change-proposals/:id/diffs
 GET /search?q=
 ```
 
-El fixture actual es `reforma-laboral-mvp-2026`, con cinco cambios de ejemplo.
-Sirve para demostrar UX; no es asesoramiento legal ni dato productivo revisado.
+El fixture actual importa manualmente 8 items reales de agendas oficiales de
+Senado y Diputados con `dataKind = REAL_AGENDA_ITEM`.
+
+Los items se muestran como `Cambios en debate` y no inventan comparaciones
+articulo por articulo: `/change-proposals/:id/diffs` devuelve una lista vacia
+hasta que se carguen los textos originales.
+
 La busqueda devuelve metadatos de coincidencia para que el frontend pueda
-resaltar cambios concretos ante preguntas como `indemnizaciones` o
-`que cambia para los trabajadores`.
+orientar preguntas como `hojarasca`, `super rigi`, `transparencia`,
+`biocombustibles`, `pesca ilegal`, `seguridad social` o `doble imposicion`.

@@ -29,11 +29,19 @@ export function toProposalOverview(proposal) {
     id: proposal.id,
     title: proposal.title,
     status: proposal.status,
-    summaryPlainLanguage: proposal.summary.short,
+    chamber: proposal.chamber,
+    statusLabelForUsers: proposal.statusLabelForUsers,
+    scheduledTreatmentDate: proposal.scheduledTreatmentDate,
+    committees: proposal.committees,
+    summaryPlainLanguage: proposal.plainLanguageSummary ?? proposal.summary.short,
     affectedTopics: proposal.topics.map((topic) => topic.label),
     affectedGroups: proposal.affectedGroups.map((group) => group.label),
     diffCount: proposal.diffs.length,
     dataStatus: proposal.dataStatus,
+    dataKind: proposal.dataKind,
+    priority: proposal.priority,
+    sourceStatus: proposal.sourceStatus,
+    sourceLinks: proposal.sourceLinks,
     source: proposal.source
   };
 }
@@ -43,6 +51,11 @@ function searchableProposalText(proposal) {
     [
       proposal.title,
       proposal.status,
+      proposal.chamber,
+      proposal.statusLabelForUsers,
+      proposal.officialDescription,
+      proposal.plainLanguageSummary,
+      proposal.committees.join(" "),
       proposal.summary.headline,
       proposal.summary.short,
       ...proposal.summary.keyPoints,
@@ -125,6 +138,18 @@ function diffSearchText(diff) {
 }
 
 function searchMatchSummary({ matchedDiffCount, topicLabels, groupLabels }) {
+  if (matchedDiffCount === 0 && topicLabels.length > 0 && groupLabels.length > 0) {
+    return `Encontramos un proyecto en debate sobre ${joinLabels(topicLabels)} que puede impactar a ${joinLabels(groupLabels)}.`;
+  }
+
+  if (matchedDiffCount === 0 && topicLabels.length > 0) {
+    return `Encontramos un proyecto en debate sobre ${joinLabels(topicLabels)}.`;
+  }
+
+  if (matchedDiffCount === 0 && groupLabels.length > 0) {
+    return `Encontramos un proyecto en debate que puede impactar a ${joinLabels(groupLabels)}.`;
+  }
+
   if (topicLabels.length > 0 && groupLabels.length > 0) {
     return `Encontramos ${formatCount(matchedDiffCount, "cambio")} ${matchedDiffCount === 1 ? "relacionado" : "relacionados"} con ${joinLabels(topicLabels)} y con ${joinLabels(groupLabels)}.`;
   }

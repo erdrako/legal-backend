@@ -2,7 +2,8 @@
 
 ## Propuestas de cambio legal
 
-La experiencia principal del MVP consulta propuestas o reformas y sus diffs:
+La experiencia principal del MVP consulta propuestas o reformas en debate y sus
+diffs cuando ya fueron cargados:
 
 ```http
 GET /change-proposals
@@ -17,18 +18,22 @@ GET /change-proposals/:id/diffs
 - resumen en lenguaje simple;
 - temas afectados;
 - grupos impactados;
-- diffs texto actual vs texto propuesto;
+- diffs texto actual vs texto propuesto, si existen;
 - fuente, estado del dato, alcance y advertencia.
 
 `GET /change-proposals/:id/diffs` devuelve solo los cambios de esa propuesta.
+Para items importados desde agenda oficial sin textos originales cargados,
+devuelve `diffs: []`.
 
 Fixture actual:
 
 ```text
-reforma-laboral-mvp-2026
+change-proposals.congress-agenda / REAL_AGENDA_ITEM
 ```
 
-El fixture es manual y acotado. No debe presentarse como dato legal productivo.
+El fixture es manual, trazable y acotado a items reales de agendas oficiales de
+Senado y Diputados. No debe inventar diffs legales ni reemplazar la fuente
+original del proyecto.
 
 ## Items legales
 
@@ -62,6 +67,16 @@ La busqueda devuelve:
   resultado incluye `matchedDiffIds`, `matchedTopicIds`, `matchedGroupIds` y
   `matchSummary` cuando la pregunta permite orientar el resultado.
 - `items`: items legales aprobados disponibles, si el dataset permite lectura.
+
+Consultas esperadas para esta etapa:
+
+- `hojarasca`
+- `super rigi`
+- `transparencia`
+- `biocombustibles`
+- `pesca ilegal`
+- `seguridad social`
+- `doble imposicion`
 
 En Worker, si D1 contiene un dataset bloqueado para lectura publica, la busqueda
 mantiene `proposals` disponible y devuelve `items = []` con `itemsUnavailable`.

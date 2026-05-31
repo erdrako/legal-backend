@@ -7,41 +7,47 @@ const app = createApp(approvedBundle);
 
 assertResponse("/legal-items", 200, (body) => Array.isArray(body.items) && body.items.length === 1);
 assertResponse("/dataset/status", 200, (body) => body.counts.legalItems === 1);
-assertResponse("/change-proposals", 200, (body) => Array.isArray(body.proposals) && body.proposals.length === 1);
 assertResponse(
-  "/change-proposals/reforma-laboral-mvp-2026",
+  "/change-proposals",
   200,
-  (body) => body.id === "reforma-laboral-mvp-2026" && body.diffs.length === 5
+  (body) =>
+    Array.isArray(body.proposals) &&
+    body.proposals.length === 8 &&
+    body.proposals[0]?.id === "ley-hojarasca" &&
+    body.proposals.every((proposal) => proposal.dataKind === "REAL_AGENDA_ITEM")
 );
 assertResponse(
-  "/change-proposals/reforma-laboral-mvp-2026/diffs",
+  "/change-proposals/ley-hojarasca",
   200,
-  (body) => body.proposalId === "reforma-laboral-mvp-2026" && body.diffs.length === 5
+  (body) => body.id === "ley-hojarasca" && body.diffs.length === 0 && body.sourceLinks.officialAgendaSourceUrl
+);
+assertResponse(
+  "/change-proposals/ley-hojarasca/diffs",
+  200,
+  (body) => body.proposalId === "ley-hojarasca" && body.diffs.length === 0
 );
 assertResponse("/legal-items/ar-law-example-001/overview", 200, (body) => body.id === "ar-law-example-001");
 assertResponse("/legal-items/ar-law-example-001/freshness", 200, (body) => body.status === "UPDATED");
 assertResponse(
-  "/search?q=reforma%20laboral",
+  "/search?q=hojarasca",
   200,
   (body) =>
     Array.isArray(body.proposals) &&
-    body.proposals[0]?.id === "reforma-laboral-mvp-2026" &&
+    body.proposals[0]?.id === "ley-hojarasca" &&
     Array.isArray(body.proposals[0].matchedDiffIds)
 );
 assertResponse(
-  "/search?q=indemnizaciones",
+  "/search?q=super%20rigi",
   200,
   (body) =>
-    body.proposals[0]?.matchedDiffIds.includes("rl-mvp-indemnizacion") &&
-    body.proposals[0]?.matchedTopicIds.includes("indemnizaciones")
+    body.proposals[0]?.id === "super-rigi" &&
+    Array.isArray(body.proposals[0]?.matchedTopicIds) &&
+    body.proposals[0]?.matchSummary
 );
 assertResponse(
-  "/search?q=que%20cambia%20para%20los%20trabajadores",
+  "/search?q=pesca%20ilegal",
   200,
-  (body) =>
-    body.proposals[0]?.matchedGroupIds.includes("trabajadores") &&
-    body.proposals[0]?.matchedDiffIds.length >= 3 &&
-    body.proposals[0]?.matchSummary.includes("Trabajadores")
+  (body) => body.proposals[0]?.id === "acuerdo-pesca-ilegal" && body.proposals[0]?.matchedTopicIds.includes("pesca")
 );
 assertResponse("/search?q=ejemplo", 200, (body) => Array.isArray(body.items) && body.items.length === 1);
 assertResponse("/search?q=", 422, (body) => body.error === "MISSING_QUERY");
