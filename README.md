@@ -51,13 +51,13 @@ GET /change-proposals/:id/diffs
 GET /search?q=
 ```
 
-El fixture actual importa manualmente 8 items reales de agendas oficiales de
-Senado y Diputados con `dataKind = REAL_AGENDA_ITEM`.
+El fixture actual expone el vertical slice de Senado con 3 propuestas reales
+importadas desde agendas oficiales con `dataKind = REAL_AGENDA_ITEM`.
 
 Los items se muestran como `Cambios en debate` y no inventan comparaciones
 articulo por articulo: `/change-proposals/:id/diffs` devuelve una lista vacia
 hasta que se carguen los textos originales.
 
 La busqueda devuelve metadatos de coincidencia para que el frontend pueda
-orientar preguntas como `hojarasca`, `super rigi`, `transparencia`,
-`biocombustibles`, `pesca ilegal`, `seguridad social` o `doble imposicion`.
+orientar preguntas como `hojarasca`, `biocombustibles`, `biodiesel`,
+`bioetanol`, `parque marino`, `Monte Leon` o `Santa Cruz`.

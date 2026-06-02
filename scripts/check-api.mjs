@@ -12,8 +12,9 @@ assertResponse(
   200,
   (body) =>
     Array.isArray(body.proposals) &&
-    body.proposals.length === 8 &&
+    body.proposals.length === 3 &&
     body.proposals[0]?.id === "ley-hojarasca" &&
+    body.proposals.every((proposal) => proposal.chamber === "SENATE") &&
     body.proposals.every((proposal) => proposal.dataKind === "REAL_AGENDA_ITEM")
 );
 assertResponse(
@@ -37,17 +38,17 @@ assertResponse(
     Array.isArray(body.proposals[0].matchedDiffIds)
 );
 assertResponse(
-  "/search?q=super%20rigi",
+  "/search?q=biocombustibles",
   200,
   (body) =>
-    body.proposals[0]?.id === "super-rigi" &&
+    body.proposals[0]?.id === "biocombustibles" &&
     Array.isArray(body.proposals[0]?.matchedTopicIds) &&
     body.proposals[0]?.matchSummary
 );
 assertResponse(
-  "/search?q=pesca%20ilegal",
+  "/search?q=santa%20cruz",
   200,
-  (body) => body.proposals[0]?.id === "acuerdo-pesca-ilegal" && body.proposals[0]?.matchedTopicIds.includes("pesca")
+  (body) => body.proposals[0]?.id === "parque-marino-monte-leon" && body.proposals[0]?.matchedTopicIds.includes("santa-cruz")
 );
 assertResponse("/search?q=ejemplo", 200, (body) => Array.isArray(body.items) && body.items.length === 1);
 assertResponse("/search?q=", 422, (body) => body.error === "MISSING_QUERY");

@@ -58,7 +58,14 @@ const blockedApp = createD1App({
 
 await assertResponse(app, "/dataset/status", 200, async (body) => body.mode === "DEV_STRUCTURAL" && body.servingPolicy.allowsDevelopmentDataset);
 await assertResponse(blockedApp, "/legal-items", 409, async (body) => body.error === "DATASET_NOT_APPROVED");
-await assertResponse("/change-proposals", 200, async (body) => body.proposals.length === 8 && body.proposals[0]?.id === "ley-hojarasca");
+await assertResponse(
+  "/change-proposals",
+  200,
+  async (body) =>
+    body.proposals.length === 3 &&
+    body.proposals[0]?.id === "ley-hojarasca" &&
+    body.proposals.every((proposal) => proposal.chamber === "SENATE")
+);
 await assertResponse(
   "/change-proposals/ley-hojarasca",
   200,
@@ -82,13 +89,12 @@ await assertResponse(
 await assertResponse("/legal-items", 200, async (body) => body.items.length === 1 && body.dataset.counts.legalItems === 1);
 await assertResponse("/legal-items/ar-law-example-001/overview", 200, async (body) => body.id === overview.id);
 await assertResponse("/legal-items/ar-law-example-001/freshness", 200, async (body) => body.status === "UPDATED");
-await assertResponse("/search?q=transparencia", 200, async (body) => body.proposals[0]?.id === "transparencia-gestion-intereses");
 await assertResponse(
-  "/search?q=seguridad%20social",
+  "/search?q=santa%20cruz",
   200,
   async (body) =>
-    body.proposals[0]?.id === "convenios-seguridad-social-suiza-san-marino" &&
-    body.proposals[0]?.matchedTopicIds.includes("seguridad-social")
+    body.proposals[0]?.id === "parque-marino-monte-leon" &&
+    body.proposals[0]?.matchedTopicIds.includes("santa-cruz")
 );
 await assertResponse("/search?q=ejemplo", 200, async (body) => body.items.length === 1);
 await assertResponse("/legal-items/missing/overview", 404, async (body) => body.error === "LEGAL_ITEM_NOT_FOUND");

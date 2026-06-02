@@ -31,9 +31,9 @@ Fixture actual:
 change-proposals.congress-agenda / REAL_AGENDA_ITEM
 ```
 
-El fixture es manual, trazable y acotado a items reales de agendas oficiales de
-Senado y Diputados. No debe inventar diffs legales ni reemplazar la fuente
-original del proyecto.
+El fixture es trazable y acotado al vertical slice de Senado. Se deriva de la
+importacion manual/deterministica del Worker de ingestion y no debe inventar
+diffs legales ni reemplazar la fuente original del proyecto.
 
 ## Items legales
 
@@ -71,12 +71,12 @@ La busqueda devuelve:
 Consultas esperadas para esta etapa:
 
 - `hojarasca`
-- `super rigi`
-- `transparencia`
 - `biocombustibles`
-- `pesca ilegal`
-- `seguridad social`
-- `doble imposicion`
+- `biodiesel`
+- `bioetanol`
+- `parque marino`
+- `Monte Leon`
+- `Santa Cruz`
 
 En Worker, si D1 contiene un dataset bloqueado para lectura publica, la busqueda
 mantiene `proposals` disponible y devuelve `items = []` con `itemsUnavailable`.
