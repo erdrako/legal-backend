@@ -152,6 +152,7 @@ POST /processing-queue/jobs
 POST /processing-queue/senate-diff-jobs
 POST /processing-queue/jobs/:id/retry
 POST /processing-review/affected-items/resolve-current-sources
+POST /processing-review/diffs/resolve
 ```
 
 Estos endpoints requieren `PROCESSOR_ADMIN_TOKEN` o
@@ -170,9 +171,24 @@ y, cuando encuentra texto HTML usable, `document_sources`/`document_texts` en
 D1 ingestion. No publica diffs ni aprueba candidatos. El batch esta limitado a
 8 items por invocacion para respetar limites de subrequests de Cloudflare.
 
-La API no aprueba ni publica diffs automaticamente: los resultados quedan como
-artifacts, normas afectadas, disposiciones extraidas, operaciones y candidatos
-de diff pendientes de validacion.
+`POST /processing-review/diffs/resolve` ejecuta el resolver deterministico de
+candidatos de diff. Toma `generated_diff_candidates`, cruza texto propuesto,
+texto vigente, operacion detectada y fuentes, y persiste `resolved_legal_diffs`
+con estado publico:
+
+- `DIFF_VALIDATED`;
+- `DIFF_PARTIAL`;
+- `DIFF_AI_ASSISTED`;
+- `DIFF_UNRESOLVED`.
+
+Si un candidato no queda `DIFF_VALIDATED`, el endpoint crea un job
+`RESOLVE_DIFF_FALLBACK` para procesador remoto con capacidad
+`LEGAL_DIFF_FALLBACK`. Cuando el procesador devuelve hints, el backend corre una
+segunda pasada deterministica antes de actualizar el diff visible.
+
+La API puede exponer diffs parciales, asistidos o no resueltos, pero siempre con
+warnings, fuentes y estado. Eso no equivale a aprobacion legal ni asesoramiento
+personalizado.
 
 ## Respuesta esperada
 

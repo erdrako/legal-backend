@@ -6,6 +6,7 @@ const PROCESSING_ROUTES = [
   "/processing-queue",
   "/processing-review",
   "/processing-review/affected-items/resolve-current-sources",
+  "/processing-review/diffs/resolve",
   "/detected-projects",
   "/processing-queue/jobs",
   "/processing-queue/senate-diff-jobs"
@@ -21,6 +22,8 @@ const DEFAULT_REQUIRED_CAPABILITIES = [
   "AFFECTED_LEGAL_ITEMS",
   "LEGAL_DIFF_CANDIDATES"
 ];
+const FALLBACK_DIFF_REQUIRED_CAPABILITIES = ["LEGAL_DIFF_FALLBACK"];
+const DIFF_RESOLVER_VERSION = "deterministic-diff-resolver@1";
 
 export function isProcessingRoute(pathname) {
   return PROCESSING_ROUTES.includes(pathname) || JOB_ACTION_PATTERN.test(pathname) || ADMIN_JOB_ACTION_PATTERN.test(pathname);
@@ -113,6 +116,15 @@ export async function handleProcessingRoute(request, env, json) {
     }
 
     return resolveAffectedCurrentSources(request, db, json);
+  }
+
+  if (request.method === "POST" && url.pathname === "/processing-review/diffs/resolve") {
+    const admin = await authenticateAdmin(request, env);
+    if (admin.error) {
+      return json(admin.status, admin.error);
+    }
+
+    return resolveDiffCandidates(request, db, json);
   }
 
   const adminJobActionMatch = url.pathname.match(ADMIN_JOB_ACTION_PATTERN);
@@ -219,19 +231,24 @@ async function claimJob(request, db, processor, json) {
   const leaseSeconds = clamp(Number(body.maxLeaseSeconds ?? 900), 60, 3600);
   const timestamp = nowIso();
   const leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+  const processorCapabilities = new Set([
+    ...parseArray(processor.capabilities_json),
+    ...stringArray(body.capabilities)
+  ]);
 
-  const candidate = await db
+  const candidateRows = await db
     .prepare(
       [
         "SELECT * FROM processing_jobs",
         "WHERE status = 'PENDING'",
         "OR (status IN ('LEASED', 'PROCESSING') AND lease_until IS NOT NULL AND lease_until < ?)",
         "ORDER BY priority DESC, created_at ASC",
-        "LIMIT 1"
+        "LIMIT 25"
       ].join(" ")
     )
     .bind(timestamp)
-    .first();
+    .all();
+  const candidate = rows(candidateRows).find((job) => jobCapabilitiesSatisfied(job, processorCapabilities));
 
   if (!candidate) {
     await touchProcessorIdle(db, processor.id, timestamp);
@@ -333,7 +350,7 @@ async function handleJobAction(request, db, processor, jobId, action, json) {
       .run();
 
     await insertArtifacts(db, jobId, processor.id, body.artifacts ?? []);
-    await persistStructuredResult(db, jobId, body.result ?? {});
+    await persistStructuredResult(db, jobId, body.result ?? {}, job);
     await insertAttempt(db, {
       jobId,
       processorId: processor.id,
@@ -695,8 +712,72 @@ async function detectedProjects(db, limit, options = {}) {
   };
 }
 
+export async function listStagingChangeProposalOverviews(db, limit = 50) {
+  const payload = await detectedProjects(db, limit);
+  const diffCounts = await resolvedDiffCountsByProposal(db);
+  return payload.projects.map((project) => toStagingProposalOverview(project, diffCounts.get(project.id)));
+}
+
+export async function getStagingChangeProposal(db, id) {
+  const payload = await detectedProjects(db, 100);
+  const project = payload.projects.find((item) => item.id === id);
+  if (!project) {
+    return null;
+  }
+
+  const diffs = await getStagingProposalDiffs(db, id);
+  return toStagingProposal(project, diffs);
+}
+
+export async function getStagingProposalDiffs(db, proposalId) {
+  const result = await db
+    .prepare(
+      [
+        "SELECT * FROM resolved_legal_diffs",
+        "WHERE proposal_id = ?",
+        "ORDER BY CASE public_status WHEN 'DIFF_VALIDATED' THEN 0 WHEN 'DIFF_PARTIAL' THEN 1 WHEN 'DIFF_AI_ASSISTED' THEN 2 ELSE 3 END, updated_at ASC"
+      ].join(" ")
+    )
+    .bind(proposalId)
+    .all();
+  return rows(result).map(toPublicLegalDiff);
+}
+
+export async function searchStagingChangeProposalOverviews(db, query, limit = 50) {
+  const terms = queryTerms(query);
+  const proposals = await listStagingChangeProposalOverviews(db, limit);
+  return proposals
+    .map((proposal) => {
+      const haystack = normalizeSearchText(
+        [
+          proposal.title,
+          proposal.statusLabelForUsers,
+          proposal.summaryPlainLanguage,
+          proposal.chamber,
+          ...(proposal.committees ?? []),
+          ...(proposal.affectedTopics ?? []),
+          ...(proposal.affectedGroups ?? [])
+        ].join(" ")
+      );
+      const score = terms.filter((term) => haystack.includes(term)).length;
+      return score > 0
+        ? {
+            ...proposal,
+            matchedDiffIds: [],
+            matchedTopicIds: [],
+            matchedGroupIds: [],
+            matchSummary: proposalStatusSummary(proposal),
+            score
+          }
+        : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.score - left.score)
+    .map(({ score, ...proposal }) => proposal);
+}
+
 async function processingReview(db, limit) {
-  const [queue, projects, candidateRows, affectedRows] = await Promise.all([
+  const [queue, projects, candidateRows, resolvedRows, affectedRows] = await Promise.all([
     queueStatus(db, Math.min(limit, 50)),
     detectedProjects(db, Math.min(limit, 50), { includeRejected: true }),
     db
@@ -708,6 +789,18 @@ async function processingReview(db, limit) {
           "FROM generated_diff_candidates gdc",
           "LEFT JOIN processing_jobs pj ON pj.id = gdc.job_id",
           "ORDER BY gdc.updated_at DESC",
+          "LIMIT ?"
+        ].join(" ")
+      )
+      .bind(clamp(limit, 1, 100))
+      .all(),
+    db
+      .prepare(
+        [
+          "SELECT rld.*, pj.source_label",
+          "FROM resolved_legal_diffs rld",
+          "LEFT JOIN processing_jobs pj ON pj.id = rld.job_id",
+          "ORDER BY rld.updated_at DESC",
           "LIMIT ?"
         ].join(" ")
       )
@@ -759,6 +852,7 @@ async function processingReview(db, limit) {
     sourceResolvedAt: row.source_resolved_at,
     updatedAt: row.updated_at
   }));
+  const resolvedDiffs = rows(resolvedRows).map(toResolvedDiffDto);
 
   return {
     generatedAt: nowIso(),
@@ -771,7 +865,8 @@ async function processingReview(db, limit) {
       notComparableJobs: queue.jobs.filter((job) => job.status === "NOT_COMPARABLE"),
       duplicateProjects: projects.projects.filter((project) => project.duplicateWarning),
       candidates,
-      affectedLegalItems
+      affectedLegalItems,
+      resolvedDiffs
     }
   };
 }
@@ -782,6 +877,7 @@ async function retryProcessingJob(db, jobId, json) {
     return json(404, { error: "PROCESSING_JOB_NOT_FOUND" });
   }
 
+  await db.prepare("DELETE FROM resolved_legal_diffs WHERE job_id = ? OR fallback_job_id = ?").bind(jobId, jobId).run();
   await db
     .prepare(
       [
@@ -894,6 +990,483 @@ async function resolveAffectedCurrentSources(request, db, json) {
     status: counters.failed > 0 ? "COMPLETED_WITH_ERRORS" : "COMPLETED",
     counters
   });
+}
+
+async function resolveDiffCandidates(request, db, json) {
+  const body = await readJson(request);
+  const ids = stringArray(body.candidateIds).slice(0, 25);
+  const limit = clamp(Number(body.limit ?? 25), 1, 50);
+  const enqueueFallback = body.enqueueFallback !== false;
+  const candidates = await listDiffCandidatesForResolution(db, { ids, limit });
+  const counters = {
+    requested: ids.length || limit,
+    selected: candidates.length,
+    validated: 0,
+    partial: 0,
+    assisted: 0,
+    unresolved: 0,
+    fallbackQueued: 0,
+    failed: 0,
+    errors: []
+  };
+  const resolvedDiffs = [];
+
+  for (const candidate of candidates) {
+    try {
+      const resolution = await resolveSingleDiffCandidate(db, candidate);
+      const fallbackJob = enqueueFallback && resolution.publicStatus !== "DIFF_VALIDATED"
+        ? await enqueueFallbackDiffJob(db, candidate, resolution)
+        : null;
+      const persisted = await persistResolvedDiff(db, {
+        ...resolution,
+        fallbackJobId: fallbackJob?.id ?? resolution.fallbackJobId
+      });
+
+      if (fallbackJob) {
+        counters.fallbackQueued += 1;
+      }
+      if (persisted.publicStatus === "DIFF_VALIDATED") {
+        counters.validated += 1;
+      } else if (persisted.publicStatus === "DIFF_PARTIAL") {
+        counters.partial += 1;
+      } else if (persisted.publicStatus === "DIFF_AI_ASSISTED") {
+        counters.assisted += 1;
+      } else {
+        counters.unresolved += 1;
+      }
+      resolvedDiffs.push(persisted);
+    } catch (error) {
+      counters.failed += 1;
+      counters.errors.push({ candidateId: candidate.id, message: readableError(error) });
+    }
+  }
+
+  return json(200, {
+    job: "resolve-diff-candidates",
+    generatedAt: nowIso(),
+    status: counters.failed > 0 ? "COMPLETED_WITH_ERRORS" : "COMPLETED",
+    counters,
+    resolvedDiffs
+  });
+}
+
+async function listDiffCandidatesForResolution(db, { ids, limit }) {
+  const selectSql = [
+    "SELECT",
+    "gdc.*,",
+    "pj.source_label, pj.source_url AS job_source_url,",
+    "co.operation_type, co.detected_verb, co.source_provision_id, co.target_provision_id, co.evidence_text, co.confidence AS operation_confidence,",
+    "ali.title AS affected_title, ali.reference_text, ali.canonical_reference_text, ali.current_source_json, ali.source_status AS affected_source_status, ali.detection_evidence_json,",
+    "ep.provision_label AS source_provision_label, ep.text_original AS source_provision_text, ep.source_url AS source_provision_url,",
+    "rld.public_status AS existing_public_status, rld.remote_assisted AS existing_remote_assisted",
+    "FROM generated_diff_candidates gdc",
+    "LEFT JOIN processing_jobs pj ON pj.id = gdc.job_id",
+    "LEFT JOIN change_operations co ON co.id = gdc.operation_id",
+    "LEFT JOIN affected_legal_items ali ON ali.id = gdc.affected_legal_item_id",
+    "LEFT JOIN extracted_provisions ep ON ep.id = co.source_provision_id",
+    "LEFT JOIN resolved_legal_diffs rld ON rld.candidate_id = gdc.id"
+  ].join(" ");
+
+  if (ids.length > 0) {
+    const placeholders = ids.map(() => "?").join(", ");
+    const result = await db
+      .prepare(`${selectSql} WHERE gdc.id IN (${placeholders}) ORDER BY gdc.updated_at DESC LIMIT ?`)
+      .bind(...ids, limit)
+      .all();
+    return rows(result);
+  }
+
+  const result = await db
+    .prepare(
+      [
+        selectSql,
+        "WHERE rld.candidate_id IS NULL OR rld.public_status != 'DIFF_VALIDATED'",
+        "ORDER BY gdc.updated_at DESC",
+        "LIMIT ?"
+      ].join(" ")
+    )
+    .bind(limit)
+    .all();
+  return rows(result);
+}
+
+async function resolveSingleDiffCandidate(db, row, hints = {}) {
+  const timestamp = nowIso();
+  const candidateCurrent = parseObject(row.current_version_json);
+  const candidateProposed = parseObject(row.proposed_version_json);
+  const currentSource = parseObject(row.current_source_json);
+  const detectionEvidence = parseObject(row.detection_evidence_json);
+  const operationType = canonicalOperationType(hints.operationType ?? row.operation_type);
+  const targetLabel = normalizeTargetLabel(
+    hints.targetLabel ??
+      row.target_provision_id ??
+      extractTargetLabel([row.evidence_text, detectionEvidence.evidenceText, row.title].join(" "))
+  );
+  const proposedVersion = buildProposedVersion(row, candidateProposed, hints);
+  const currentContext = await findCurrentTextContext(db, row, currentSource);
+  const currentVersion = buildCurrentVersion(row, candidateCurrent, currentContext, operationType, targetLabel, hints);
+  const warnings = unique([
+    ...parseArray(row.validation_warnings_json),
+    ...arrayValue(hints.validationWarnings),
+    ...currentVersion.warnings,
+    ...proposedVersion.warnings
+  ]);
+  const currentRequired = operationRequiresCurrentText(operationType);
+
+  if (operationType === "NOT_COMPARABLE" || operationType === "APPROVAL_ONLY" || operationType === "APPROVE_TREATY" || operationType === "APPROVE_AGREEMENT") {
+    warnings.push("NOT_COMPARABLE_OPERATION");
+  }
+  if (!targetLabel && operationTargetsProvision(operationType)) {
+    warnings.push("TARGET_PROVISION_PENDING");
+  }
+  if (currentRequired && !currentVersion.value?.text) {
+    warnings.push("CURRENT_VERSION_PENDING");
+  }
+  if (!proposedVersion.value?.text) {
+    warnings.push("PROPOSED_VERSION_PENDING");
+  }
+
+  const hasCurrent = Boolean(currentVersion.value?.text);
+  const hasProposed = Boolean(proposedVersion.value?.text);
+  const cleanWarnings = normalizeResolutionWarnings(unique(warnings), {
+    hasCurrent,
+    hasProposed,
+    hasCurrentSource: row.affected_source_status === "LOADED" || Boolean(currentContext?.text)
+  });
+  const remoteAssisted = Boolean(hints.remoteAssisted || row.existing_remote_assisted);
+  const publicStatus = diffPublicStatus({
+    operationType,
+    warnings: cleanWarnings,
+    currentRequired,
+    remoteAssisted,
+    hasCurrent,
+    hasProposed
+  });
+
+  return {
+    id: `resolved-diff-${await sha256Hex(row.id)}`,
+    candidateId: row.id,
+    jobId: row.job_id,
+    proposalId: row.proposal_id,
+    operationId: row.operation_id,
+    affectedLegalItemId: row.affected_legal_item_id,
+    fallbackJobId: hints.fallbackJobId ?? null,
+    title: stringValue(hints.title ?? row.title, "Diff legal resuelto"),
+    publicStatus,
+    changeType: stringValue(hints.changeType ?? row.change_type, "MODIFIED"),
+    operationType,
+    targetLabel,
+    currentVersion: currentVersion.value,
+    proposedVersion: proposedVersion.value,
+    explanationPlainLanguage: stringValue(
+      hints.explanationPlainLanguage ?? row.explanation_plain_language,
+      explanationForOperation(operationType, publicStatus)
+    ),
+    practicalImpact: stringValue(
+      hints.practicalImpact ?? row.practical_impact,
+      practicalImpactForStatus(publicStatus)
+    ),
+    confidence: confidenceForResolution(row, cleanWarnings, remoteAssisted),
+    validationWarnings: cleanWarnings,
+    sourceTrace: {
+      resolver: DIFF_RESOLVER_VERSION,
+      deterministicPass: hints.remoteAssisted ? "after_remote_fallback" : "initial",
+      currentSource,
+      currentTextSourceUrl: currentContext?.sourceUrl,
+      proposedSourceUrl: proposedVersion.value?.originalSource?.sourceUrl,
+      evidenceText: row.evidence_text ?? detectionEvidence.evidenceText,
+      detectionEvidence
+    },
+    resolverVersion: DIFF_RESOLVER_VERSION,
+    remoteAssisted,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+function buildProposedVersion(row, candidateProposed, hints) {
+  const text = stringValue(
+    hints.proposedText ?? candidateProposed.text ?? row.source_provision_text,
+    ""
+  );
+  const sourceUrl =
+    hints.proposedSourceUrl ??
+    candidateProposed.originalSource?.sourceUrl ??
+    candidateProposed.source?.sourceUrl ??
+    row.source_provision_url ??
+    row.job_source_url;
+  const warnings = [];
+  if (!text) {
+    warnings.push("PROPOSED_VERSION_PENDING");
+  }
+  if (!sourceUrl) {
+    warnings.push("PROPOSED_SOURCE_PENDING");
+  }
+
+  return {
+    warnings,
+    value: {
+      id: candidateProposed.id ?? `${row.id}-proposed`,
+      label: candidateProposed.label ?? "Texto propuesto",
+      legalItemId: candidateProposed.legalItemId,
+      legalItemTitle: candidateProposed.legalItemTitle ?? row.source_label ?? "Proyecto Senado",
+      provisionId: candidateProposed.provisionId ?? row.source_provision_id,
+      provisionLabel: candidateProposed.provisionLabel ?? row.source_provision_label ?? "Provision propuesta",
+      text,
+      status: "PROPUESTO",
+      source: candidateProposed.source ?? {
+        id: "senado-proposed-text",
+        name: "Senado de la Nacion Argentina",
+        sourceUrl,
+        official: true
+      },
+      sourceStatus: sourceUrl ? "LOADED" : "PENDING",
+      originalSource: candidateProposed.originalSource ?? {
+        status: sourceUrl ? "LOADED" : "PENDING",
+        label: "Texto propuesto original",
+        name: sourceUrl ? "Senado de la Nacion Argentina" : undefined,
+        sourceUrl,
+        official: Boolean(sourceUrl)
+      }
+    }
+  };
+}
+
+function buildCurrentVersion(row, candidateCurrent, currentContext, operationType, targetLabel, hints) {
+  const warnings = [];
+  const currentSource = parseObject(row.current_source_json);
+  const hintedText = stringValue(hints.currentText, "");
+  let text = stringValue(candidateCurrent.text ?? hintedText, "");
+  let provisionLabel = candidateCurrent.provisionLabel ?? targetLabel;
+  let sourceUrl = candidateCurrent.originalSource?.sourceUrl ?? candidateCurrent.source?.sourceUrl ?? currentSource.sourceUrl;
+
+  if (!text && currentContext?.text) {
+    if (operationType === "REPEAL_LAW" || !targetLabel) {
+      text = clipTextForDisplay(currentContext.text);
+      provisionLabel = operationType === "REPEAL_LAW" ? "Ley completa vigente" : "Texto vigente sin articulo matcheado";
+      if (currentContext.text.length > text.length) {
+        warnings.push("CURRENT_TEXT_TRUNCATED_FOR_DISPLAY");
+      }
+      if (!targetLabel && operationTargetsProvision(operationType)) {
+        warnings.push("TARGET_ARTICLE_NOT_FOUND");
+      }
+    } else {
+      const article = findArticleInText(currentContext.text, targetLabel);
+      if (article) {
+        text = article.text;
+        provisionLabel = article.label;
+      } else {
+        text = clipTextForDisplay(currentContext.text);
+        provisionLabel = "Texto vigente completo (sin articulo matcheado)";
+        warnings.push("TARGET_ARTICLE_NOT_FOUND");
+        if (currentContext.text.length > text.length) {
+          warnings.push("CURRENT_TEXT_TRUNCATED_FOR_DISPLAY");
+        }
+      }
+    }
+    sourceUrl = sourceUrl ?? currentContext.sourceUrl;
+  }
+
+  if (operationRequiresCurrentText(operationType) && !text) {
+    warnings.push("CURRENT_VERSION_PENDING");
+  }
+  if (operationRequiresCurrentText(operationType) && row.affected_source_status !== "LOADED") {
+    warnings.push("CURRENT_SOURCE_NOT_LOADED");
+  }
+
+  return {
+    warnings,
+    value: text
+      ? {
+          id: candidateCurrent.id ?? `${row.id}-current`,
+          label: candidateCurrent.label ?? "Texto vigente",
+          legalItemId: candidateCurrent.legalItemId ?? row.legal_item_id,
+          legalItemTitle: candidateCurrent.legalItemTitle ?? row.affected_title ?? row.canonical_reference_text,
+          provisionId: candidateCurrent.provisionId,
+          provisionLabel,
+          text,
+          status: "VIGENTE",
+          source: candidateCurrent.source ?? {
+            id: "current-official-text",
+            name: currentSource.institution ?? "Fuente oficial vigente",
+            sourceUrl,
+            official: true
+          },
+          sourceStatus: sourceUrl ? "LOADED" : "PENDING",
+          originalSource: candidateCurrent.originalSource ?? {
+            status: sourceUrl ? "LOADED" : "PENDING",
+            label: "Texto vigente original",
+            name: currentSource.institution ?? "Fuente oficial vigente",
+            sourceUrl,
+            official: Boolean(sourceUrl)
+          }
+        }
+      : undefined
+  };
+}
+
+async function findCurrentTextContext(db, row, currentSource) {
+  const proposalId = row.proposal_id;
+  if (!proposalId) {
+    return null;
+  }
+
+  const result = await db
+    .prepare(
+      [
+        "SELECT ds.source_url, ds.source_label, dt.normalized_text, dt.extracted_text, dt.content_hash",
+        "FROM document_sources ds",
+        "LEFT JOIN document_texts dt ON dt.document_source_id = ds.id",
+        "WHERE (ds.proposal_id = ? OR ds.agenda_item_id = ?)",
+        "AND ds.source_role = 'CURRENT_TEXT'",
+        "AND ds.status = 'LOADED'",
+        "ORDER BY CASE WHEN ds.source_url = ? THEN 0 ELSE 1 END, ds.updated_at DESC",
+        "LIMIT 1"
+      ].join(" ")
+    )
+    .bind(proposalId, proposalId, currentSource?.sourceUrl ?? "")
+    .first();
+
+  if (!result) {
+    return null;
+  }
+
+  const text = stringValue(result.normalized_text ?? result.extracted_text, "");
+  return text
+    ? {
+        text,
+        sourceUrl: result.source_url,
+        sourceLabel: result.source_label,
+        contentHash: result.content_hash
+      }
+    : null;
+}
+
+async function persistResolvedDiff(db, resolution) {
+  const timestamp = nowIso();
+  await db
+    .prepare(
+      [
+        "INSERT OR REPLACE INTO resolved_legal_diffs",
+        "(id, candidate_id, job_id, proposal_id, operation_id, affected_legal_item_id, fallback_job_id, title, public_status, change_type, operation_type, target_label, current_version_json, proposed_version_json, explanation_plain_language, practical_impact, confidence, validation_warnings_json, source_trace_json, resolver_version, remote_assisted, created_at, updated_at)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM resolved_legal_diffs WHERE id = ?), ?), ?)"
+      ].join(" ")
+    )
+    .bind(
+      resolution.id,
+      resolution.candidateId,
+      nullableString(resolution.jobId),
+      nullableString(resolution.proposalId),
+      nullableString(resolution.operationId),
+      nullableString(resolution.affectedLegalItemId),
+      nullableString(resolution.fallbackJobId),
+      stringValue(resolution.title, "Diff legal resuelto"),
+      stringValue(resolution.publicStatus, "DIFF_UNRESOLVED"),
+      stringValue(resolution.changeType, "MODIFIED"),
+      nullableString(resolution.operationType),
+      nullableString(resolution.targetLabel),
+      resolution.currentVersion ? JSON.stringify(resolution.currentVersion) : null,
+      resolution.proposedVersion ? JSON.stringify(resolution.proposedVersion) : null,
+      nullableString(resolution.explanationPlainLanguage),
+      nullableString(resolution.practicalImpact),
+      stringValue(resolution.confidence, "LOW"),
+      JSON.stringify(arrayValue(resolution.validationWarnings)),
+      JSON.stringify(resolution.sourceTrace ?? {}),
+      stringValue(resolution.resolverVersion, DIFF_RESOLVER_VERSION),
+      resolution.remoteAssisted ? 1 : 0,
+      resolution.id,
+      timestamp,
+      timestamp
+    )
+    .run();
+
+  await db
+    .prepare(
+      [
+        "UPDATE generated_diff_candidates",
+        "SET review_status = ?, validation_warnings_json = ?, updated_at = ?",
+        "WHERE id = ?"
+      ].join(" ")
+    )
+    .bind(resolution.publicStatus, JSON.stringify(arrayValue(resolution.validationWarnings)), timestamp, resolution.candidateId)
+    .run();
+
+  return toResolvedDiffDto({
+    id: resolution.id,
+    candidate_id: resolution.candidateId,
+    job_id: resolution.jobId,
+    proposal_id: resolution.proposalId,
+    operation_id: resolution.operationId,
+    affected_legal_item_id: resolution.affectedLegalItemId,
+    fallback_job_id: resolution.fallbackJobId,
+    title: resolution.title,
+    public_status: resolution.publicStatus,
+    change_type: resolution.changeType,
+    operation_type: resolution.operationType,
+    target_label: resolution.targetLabel,
+    current_version_json: resolution.currentVersion ? JSON.stringify(resolution.currentVersion) : null,
+    proposed_version_json: resolution.proposedVersion ? JSON.stringify(resolution.proposedVersion) : null,
+    explanation_plain_language: resolution.explanationPlainLanguage,
+    practical_impact: resolution.practicalImpact,
+    confidence: resolution.confidence,
+    validation_warnings_json: JSON.stringify(arrayValue(resolution.validationWarnings)),
+    source_trace_json: JSON.stringify(resolution.sourceTrace ?? {}),
+    resolver_version: resolution.resolverVersion,
+    remote_assisted: resolution.remoteAssisted ? 1 : 0,
+    created_at: resolution.createdAt,
+    updated_at: timestamp
+  });
+}
+
+async function enqueueFallbackDiffJob(db, candidate, resolution) {
+  const dedupeKey = `diff-fallback:${candidate.id}`;
+  const existing = await db.prepare("SELECT * FROM processing_jobs WHERE dedupe_key = ?").bind(dedupeKey).first();
+  if (existing) {
+    return existing;
+  }
+
+  return insertProcessingJob(db, {
+    jobType: "RESOLVE_DIFF_FALLBACK",
+    priority: 30,
+    input: {
+      candidate: {
+        id: candidate.id,
+        title: candidate.title,
+        changeType: candidate.change_type,
+        operationType: candidate.operation_type,
+        evidenceText: candidate.evidence_text,
+        validationWarnings: parseArray(candidate.validation_warnings_json)
+      },
+      resolution,
+      proposedVersion: resolution.proposedVersion,
+      currentVersion: resolution.currentVersion,
+      sourceTrace: resolution.sourceTrace
+    },
+    requiredCapabilities: FALLBACK_DIFF_REQUIRED_CAPABILITIES,
+    sourceLabel: `Fallback diff: ${candidate.title}`,
+    sourceUrl: candidate.job_source_url,
+    dedupeKey
+  });
+}
+
+async function persistFallbackDiffResult(db, job, result) {
+  for (const hint of arrayValue(result.fallbackDiffResolutions)) {
+    const candidateId = stringValue(hint.candidateId, "");
+    if (!candidateId) {
+      continue;
+    }
+    const rowsToResolve = await listDiffCandidatesForResolution(db, { ids: [candidateId], limit: 1 });
+    const candidate = rowsToResolve[0];
+    if (!candidate) {
+      continue;
+    }
+    const resolution = await resolveSingleDiffCandidate(db, candidate, {
+      ...hint,
+      fallbackJobId: job.id,
+      remoteAssisted: true
+    });
+    await persistResolvedDiff(db, resolution);
+  }
 }
 
 async function listAffectedItemsForCurrentSourceResolution(db, { ids, limit }) {
@@ -1217,6 +1790,554 @@ function detectedProjectCounts(projects) {
   return counts;
 }
 
+async function resolvedDiffCountsByProposal(db) {
+  const result = await db
+    .prepare("SELECT proposal_id, public_status, COUNT(*) AS count FROM resolved_legal_diffs GROUP BY proposal_id, public_status")
+    .all();
+  const byProposal = new Map();
+  for (const row of rows(result)) {
+    if (!byProposal.has(row.proposal_id)) {
+      byProposal.set(row.proposal_id, {
+        total: 0,
+        validated: 0,
+        partial: 0,
+        assisted: 0,
+        unresolved: 0
+      });
+    }
+    const counts = byProposal.get(row.proposal_id);
+    const count = Number(row.count ?? 0);
+    counts.total += count;
+    if (row.public_status === "DIFF_VALIDATED") {
+      counts.validated += count;
+    } else if (row.public_status === "DIFF_PARTIAL") {
+      counts.partial += count;
+    } else if (row.public_status === "DIFF_AI_ASSISTED") {
+      counts.assisted += count;
+    } else {
+      counts.unresolved += count;
+    }
+  }
+  return byProposal;
+}
+
+function toStagingProposalOverview(project, diffCounts = {}) {
+  const full = toStagingProposal(project, []);
+  const totalDiffs = Number(diffCounts.total ?? 0);
+  return {
+    id: full.id,
+    title: full.title,
+    status: full.status,
+    chamber: full.chamber,
+    statusLabelForUsers: full.statusLabelForUsers,
+    scheduledTreatmentDate: full.scheduledTreatmentDate,
+    committees: full.committees,
+    summaryPlainLanguage: full.plainLanguageSummary,
+    affectedTopics: full.topics.map((topic) => topic.label),
+    affectedGroups: full.affectedGroups.map((group) => group.label),
+    diffCount: totalDiffs,
+    diffStatusSummary: {
+      validated: Number(diffCounts.validated ?? 0),
+      partial: Number(diffCounts.partial ?? 0),
+      assisted: Number(diffCounts.assisted ?? 0),
+      unresolved: Number(diffCounts.unresolved ?? 0)
+    },
+    dataStatus: full.dataStatus,
+    dataKind: full.dataKind,
+    priority: full.priority,
+    sourceStatus: full.sourceStatus,
+    sourceLinks: full.sourceLinks,
+    source: full.source
+  };
+}
+
+function toStagingProposal(project, diffs) {
+  const sources = project.sources ?? [];
+  const officialAgenda = sourceByRole(sources, "OFFICIAL_AGENDA");
+  const officialCitation = sourceByRole(sources, "OFFICIAL_CITATION");
+  const proposedText = sourceByRole(sources, "PROPOSED_TEXT");
+  const currentText = sourceByRole(sources, "CURRENT_TEXT");
+  const topics = topicsForProject(project);
+  const groups = groupsForProject(project);
+  const statusLabel = project.status === "ready_for_validation" ? "Listo para validacion tecnica" : "En revision tecnica";
+  const diffSummary = summarizeDiffs(diffs);
+  const displayTitle = displayTitleForProject(project);
+
+  return {
+    id: project.id,
+    title: displayTitle,
+    status: "IN_DEBATE",
+    jurisdiction: { country: "AR", level: "NATIONAL" },
+    chamber: project.chamber ?? "SENATE",
+    statusLabelForUsers: statusLabel,
+    scheduledTreatmentDate: project.scheduledAt,
+    committees: project.committees ?? [],
+    officialDescription: project.officialDescription ?? "Descripcion oficial pendiente",
+    plainLanguageSummary: plainSummaryForProject(project),
+    typeOfChange: "Proyecto detectado desde agenda oficial",
+    summary: {
+      headline: displayTitle,
+      short: plainSummaryForProject(project),
+      keyPoints: [
+        "Proyecto detectado en staging desde una agenda oficial del Senado.",
+        `${diffSummary.validated} diffs validados, ${diffSummary.partial} parciales, ${diffSummary.assisted} asistidos y ${diffSummary.unresolved} no resueltos.`,
+        proposedText?.status === "LOADED" ? "Texto propuesto original cargado." : "Texto propuesto original pendiente."
+      ],
+      whatItMeans: [
+        "LexMapa muestra el estado real del procesamiento para no ocultar pendientes.",
+        "Las comparaciones pueden estar validadas, parciales, asistidas o no resueltas."
+      ],
+      limitations: [
+        "Dato en staging tecnico; no implica aprobacion legal.",
+        "Los diffs con advertencias deben leerse junto con sus fuentes originales."
+      ],
+      legalAdviceWarning:
+        "LexMapa explica cambios legales en lenguaje simple, pero no brinda asesoramiento legal personalizado."
+    },
+    topics,
+    affectedGroups: groups,
+    diffs,
+    queryExamples: queryExamplesForProject({ ...project, title: displayTitle }),
+    source: {
+      id: officialAgenda?.id ?? "senate-staging",
+      name: officialAgenda?.label ?? officialAgenda?.role ?? "Agenda oficial Senado",
+      sourceUrl: officialAgenda?.url,
+      retrievedAt: officialAgenda?.lastCheckedAt,
+      official: true
+    },
+    sourceLinks: {
+      officialAgendaSourceUrl: officialAgenda?.url,
+      officialCitationUrl: officialCitation?.url,
+      proposedTextOriginalUrl: proposedText?.url,
+      currentLawOriginalUrl: currentText?.url
+    },
+    sourceStatus: project.sourceStatuses?.PROPOSED_TEXT === "LOADED" ? "LOADED" : "NEEDS_REVIEW",
+    priority: priorityForProject(project),
+    dataKind: "REAL_AGENDA_ITEM",
+    importedFrom: officialAgenda?.url ?? proposedText?.url ?? "",
+    importedAt: project.createdAt,
+    lastCheckedAt: project.updatedAt,
+    originalSources: {
+      current: currentText ? loadedOriginalSourceFromDocument(currentText, "Texto vigente original") : pendingOriginalSourceDto("Texto vigente original"),
+      proposed: proposedText ? loadedOriginalSourceFromDocument(proposedText, "Texto propuesto original") : pendingOriginalSourceDto("Texto propuesto original")
+    },
+    dataStatus: "NEEDS_LEGAL_REVIEW",
+    updatedAt: project.updatedAt,
+    scopeNote: "Proyecto en staging. Puede contener comparaciones parciales, asistidas o pendientes.",
+    legalAdviceWarning: "LexMapa no brinda asesoramiento legal personalizado. Verifique siempre la fuente legal aplicable."
+  };
+}
+
+function toPublicLegalDiff(row) {
+  const currentVersion = parseNullableObject(row.current_version_json) ?? pendingLegalVersion("Texto vigente", "Texto vigente pendiente o no matcheado.");
+  const proposedVersion = parseNullableObject(row.proposed_version_json) ?? pendingLegalVersion("Texto propuesto", "Texto propuesto pendiente.");
+  const warnings = parseArray(row.validation_warnings_json);
+  return {
+    id: row.id,
+    proposalId: row.proposal_id,
+    title: row.title,
+    changeType: row.change_type,
+    affectedTopicIds: ["tema-principal"],
+    affectedGroupIds: ["grupo-general"],
+    currentVersion,
+    proposedVersion,
+    explanationPlainLanguage: row.explanation_plain_language ?? explanationForOperation(row.operation_type, row.public_status),
+    practicalImpact: row.practical_impact ?? practicalImpactForStatus(row.public_status),
+    impactLevel: row.public_status === "DIFF_VALIDATED" ? "MEDIUM" : "UNKNOWN",
+    source: {
+      id: "resolved-diff-source",
+      name: row.remote_assisted ? "Resolver deterministico + procesador remoto" : "Resolver deterministico LexMapa",
+      official: false
+    },
+    dataStatus: row.public_status === "DIFF_VALIDATED" ? "NEEDS_LEGAL_REVIEW" : "NEEDS_LEGAL_REVIEW",
+    traceability: {
+      notes: `${formatDiffPublicStatus(row.public_status)}. ${warnings.join(", ") || "Sin warnings criticos."}`
+    },
+    publicStatus: row.public_status,
+    validationWarnings: warnings,
+    confidence: row.confidence,
+    remoteAssisted: Boolean(row.remote_assisted)
+  };
+}
+
+function pendingLegalVersion(label, text) {
+  return {
+    id: `pending-${label.toLowerCase().replaceAll(" ", "-")}`,
+    label,
+    text,
+    status: "DESCONOCIDO",
+    source: { id: "pending-source", name: "Fuente pendiente", official: false },
+    sourceStatus: "PENDING",
+    originalSource: pendingOriginalSourceDto(label)
+  };
+}
+
+function sourceByRole(sources, role) {
+  return sources.find((source) => source.role === role);
+}
+
+function loadedOriginalSourceFromDocument(source, label) {
+  return {
+    status: source.status === "LOADED" ? "LOADED" : "NEEDS_REVIEW",
+    label,
+    name: source.label ?? source.institution ?? "Fuente original",
+    sourceUrl: source.url,
+    retrievedAt: source.lastCheckedAt,
+    official: true,
+    note: source.notes
+  };
+}
+
+function pendingOriginalSourceDto(label) {
+  return {
+    status: "PENDING",
+    label,
+    note: "Fuente original pendiente de carga"
+  };
+}
+
+function topicsForProject(project) {
+  const text = normalizeSearchText([project.title, project.officialDescription].join(" "));
+  const detected = [];
+  if (text.includes("biocombustible") || text.includes("combustible")) {
+    detected.push({ id: "energia", label: "Energia", summaryPlainLanguage: "Cambios sobre combustibles, energia o regulacion sectorial." });
+  }
+  if (text.includes("ambiente") || text.includes("parque") || text.includes("marino")) {
+    detected.push({ id: "ambiente", label: "Ambiente", summaryPlainLanguage: "Cambios sobre ambiente, areas protegidas o recursos naturales." });
+  }
+  if (text.includes("deroga") || text.includes("hojarasca")) {
+    detected.push({ id: "simplificacion-normativa", label: "Simplificacion normativa", summaryPlainLanguage: "Derogaciones o limpieza de normas sin uso actual claro." });
+  }
+  if (detected.length === 0) {
+    detected.push({ id: "tema-principal", label: "Tema principal", summaryPlainLanguage: "Tema detectado desde la agenda oficial y pendiente de clasificacion fina." });
+  }
+  return detected;
+}
+
+function groupsForProject(project) {
+  const text = normalizeSearchText([project.title, project.officialDescription].join(" "));
+  const groups = [{ id: "ciudadanos", label: "Ciudadanos", impactSummary: "Personas alcanzadas directa o indirectamente por el cambio en debate." }];
+  if (text.includes("empresa") || text.includes("inversion") || text.includes("combustible")) {
+    groups.push({ id: "empresas", label: "Empresas y sectores regulados", impactSummary: "Actores economicos que podrian tener obligaciones, beneficios o reglas nuevas." });
+  }
+  if (text.includes("estado") || text.includes("administracion")) {
+    groups.push({ id: "estado", label: "Estado y administracion publica", impactSummary: "Organismos responsables de aplicar, coordinar o controlar el cambio." });
+  }
+  return groups;
+}
+
+function summarizeDiffs(diffs) {
+  return {
+    validated: diffs.filter((diff) => diff.publicStatus === "DIFF_VALIDATED").length,
+    partial: diffs.filter((diff) => diff.publicStatus === "DIFF_PARTIAL").length,
+    assisted: diffs.filter((diff) => diff.publicStatus === "DIFF_AI_ASSISTED").length,
+    unresolved: diffs.filter((diff) => diff.publicStatus === "DIFF_UNRESOLVED").length
+  };
+}
+
+function plainSummaryForProject(project) {
+  return stringValue(
+    project.officialDescription,
+    "Proyecto detectado desde agenda oficial. LexMapa muestra fuentes, estado y comparaciones disponibles."
+  );
+}
+
+function displayTitleForProject(project) {
+  const text = normalizeSearchText([project.title, project.officialDescription, project.expedientNumber].join(" "));
+  if (text.includes("hojarasca")) {
+    return "Ley Hojarasca";
+  }
+  if (text.includes("monte leon")) {
+    return "Parque Interjurisdiccional Marino Monte Leon";
+  }
+  if (text.includes("biocombustible")) {
+    return `Biocombustibles${project.expedientNumber ? ` - ${project.expedientNumber}` : ""}`;
+  }
+  return project.title ?? project.expedientNumber ?? "Proyecto detectado";
+}
+
+function queryExamplesForProject(project) {
+  const title = normalizeSearchText(project.title);
+  return [
+    `que cambia con ${project.title}`,
+    title.includes("biocombustible") ? "que cambia con biocombustibles" : "",
+    title.includes("hojarasca") ? "que cambia con la ley hojarasca" : ""
+  ].filter(Boolean);
+}
+
+function priorityForProject(project) {
+  const text = normalizeSearchText([project.title, project.officialDescription].join(" "));
+  if (text.includes("hojarasca") || text.includes("transparencia") || text.includes("rigi")) {
+    return "HIGH";
+  }
+  if (text.includes("biocombustible")) {
+    return "MEDIUM_HIGH";
+  }
+  return "MEDIUM";
+}
+
+function proposalStatusSummary(proposal) {
+  const diffSummary = proposal.diffStatusSummary ?? {};
+  return `Encontramos un proyecto en staging con ${Number(diffSummary.validated ?? 0)} diffs validados, ${Number(diffSummary.partial ?? 0)} parciales y ${Number(diffSummary.assisted ?? 0)} asistidos.`;
+}
+
+function formatDiffPublicStatus(value) {
+  const labels = {
+    DIFF_VALIDATED: "Comparacion validada automaticamente",
+    DIFF_PARTIAL: "Comparacion parcial",
+    DIFF_AI_ASSISTED: "Comparacion asistida por procesador remoto",
+    DIFF_UNRESOLVED: "Comparacion no resuelta"
+  };
+  return labels[value] ?? "Estado de comparacion pendiente";
+}
+
+function queryTerms(query) {
+  return unique(
+    normalizeSearchText(query)
+      .split(/[^a-z0-9]+/g)
+      .map((term) => term.trim())
+      .filter((term) => term.length > 2)
+  );
+}
+
+function normalizeSearchText(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function toResolvedDiffDto(row) {
+  return {
+    id: row.id,
+    candidateId: row.candidate_id,
+    jobId: row.job_id ?? undefined,
+    proposalId: row.proposal_id ?? undefined,
+    operationId: row.operation_id ?? undefined,
+    affectedLegalItemId: row.affected_legal_item_id ?? undefined,
+    fallbackJobId: row.fallback_job_id ?? undefined,
+    sourceLabel: row.source_label ?? undefined,
+    title: row.title,
+    publicStatus: row.public_status,
+    changeType: row.change_type,
+    operationType: row.operation_type ?? undefined,
+    targetLabel: row.target_label ?? undefined,
+    currentVersion: parseNullableObject(row.current_version_json),
+    proposedVersion: parseNullableObject(row.proposed_version_json),
+    explanationPlainLanguage: row.explanation_plain_language ?? "",
+    practicalImpact: row.practical_impact ?? "",
+    confidence: row.confidence,
+    validationWarnings: parseArray(row.validation_warnings_json),
+    sourceTrace: parseObject(row.source_trace_json),
+    resolverVersion: row.resolver_version,
+    remoteAssisted: Boolean(row.remote_assisted),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function canonicalOperationType(value) {
+  const normalized = String(value ?? "UNKNOWN_OPERATION").toUpperCase();
+  const aliases = {
+    MODIFY_PROVISION: "MODIFY_ARTICLE",
+    ADD_PROVISION: "ADD_ARTICLE",
+    REPEAL_PROVISION: "REMOVE_ARTICLE",
+    NEW_REGIME: "ADD_NEW_REGIME",
+    APPROVAL_ONLY: "APPROVAL_ONLY"
+  };
+  return aliases[normalized] ?? normalized;
+}
+
+function normalizeTargetLabel(value) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  const article = extractTargetLabel(text);
+  return article ?? text;
+}
+
+function extractTargetLabel(text) {
+  const match = String(text ?? "").match(/\bart[íi]culo\s+(\d+[°º]?(?:\s*(?:bis|ter|quater))?)/i);
+  if (!match) {
+    return null;
+  }
+  return `Articulo ${match[1].replace(/[°º]/g, "").trim()}`;
+}
+
+function operationRequiresCurrentText(operationType) {
+  return [
+    "MODIFY_ARTICLE",
+    "REMOVE_ARTICLE",
+    "REPEAL_LAW",
+    "REPLACE_LAW",
+    "MODIFY_SECTION",
+    "REMOVE_SECTION",
+    "MODIFY_PARAGRAPH",
+    "REMOVE_PARAGRAPH",
+    "MODIFY_SUBSECTION",
+    "REMOVE_SUBSECTION",
+    "REPLACE_TEXT",
+    "UPDATE_AMOUNT",
+    "UPDATE_PERCENTAGE",
+    "UPDATE_DEADLINE",
+    "EXTEND_DEADLINE",
+    "SUSPEND_EFFECT",
+    "RESTORE_EFFECT",
+    "ANNEX_CHANGE",
+    "TEXT_CORRECTION"
+  ].includes(operationType);
+}
+
+function operationTargetsProvision(operationType) {
+  return [
+    "MODIFY_ARTICLE",
+    "ADD_ARTICLE",
+    "REMOVE_ARTICLE",
+    "MODIFY_SECTION",
+    "ADD_SECTION",
+    "REMOVE_SECTION",
+    "MODIFY_PARAGRAPH",
+    "ADD_PARAGRAPH",
+    "REMOVE_PARAGRAPH",
+    "MODIFY_SUBSECTION",
+    "ADD_SUBSECTION",
+    "REMOVE_SUBSECTION"
+  ].includes(operationType);
+}
+
+function diffPublicStatus({ operationType, warnings, currentRequired, remoteAssisted, hasCurrent, hasProposed }) {
+  if (["NOT_COMPARABLE", "APPROVAL_ONLY", "APPROVE_TREATY", "APPROVE_AGREEMENT"].includes(operationType)) {
+    return remoteAssisted ? "DIFF_AI_ASSISTED" : "DIFF_UNRESOLVED";
+  }
+
+  const criticalWarnings = warnings.filter((warning) =>
+    [
+      "CURRENT_VERSION_PENDING",
+      "CURRENT_SOURCE_NOT_LOADED",
+      "PROPOSED_VERSION_PENDING",
+      "TARGET_ARTICLE_NOT_FOUND",
+      "TARGET_PROVISION_PENDING"
+    ].includes(warning)
+  );
+
+  if (remoteAssisted && criticalWarnings.length > 0) {
+    return "DIFF_AI_ASSISTED";
+  }
+  if (currentRequired && (!hasCurrent || !hasProposed)) {
+    return remoteAssisted ? "DIFF_AI_ASSISTED" : "DIFF_PARTIAL";
+  }
+  if (criticalWarnings.length > 0) {
+    return remoteAssisted ? "DIFF_AI_ASSISTED" : "DIFF_PARTIAL";
+  }
+  return "DIFF_VALIDATED";
+}
+
+function normalizeResolutionWarnings(warnings, { hasCurrent, hasProposed, hasCurrentSource }) {
+  return warnings.filter((warning) => {
+    if (warning === "CURRENT_VERSION_PENDING" && hasCurrent) {
+      return false;
+    }
+    if (warning === "PROPOSED_VERSION_PENDING" && hasProposed) {
+      return false;
+    }
+    if (warning === "CURRENT_SOURCE_NOT_LOADED" && hasCurrentSource) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function explanationForOperation(operationType, publicStatus) {
+  const operationLabels = {
+    REPEAL_LAW: "El proyecto propone derogar una ley completa.",
+    MODIFY_ARTICLE: "El proyecto propone modificar un articulo de una norma vigente.",
+    ADD_ARTICLE: "El proyecto propone incorporar un articulo nuevo.",
+    REMOVE_ARTICLE: "El proyecto propone eliminar un articulo vigente.",
+    ADD_NEW_REGIME: "El proyecto propone crear un regimen nuevo.",
+    APPROVAL_ONLY: "El proyecto aprueba un documento o acuerdo y no tiene un antes/despues directo."
+  };
+  const base = operationLabels[operationType] ?? "El proyecto contiene una operacion legal detectada automaticamente.";
+  if (publicStatus === "DIFF_VALIDATED") {
+    return `${base} La comparacion fue resuelta automaticamente con fuentes trazables.`;
+  }
+  if (publicStatus === "DIFF_AI_ASSISTED") {
+    return `${base} La comparacion fue asistida por procesador remoto y conserva advertencias visibles.`;
+  }
+  if (publicStatus === "DIFF_PARTIAL") {
+    return `${base} La comparacion es parcial porque falta validar o matchear algun elemento.`;
+  }
+  return `${base} No se pudo construir una comparacion articulo por articulo completa.`;
+}
+
+function practicalImpactForStatus(publicStatus) {
+  const labels = {
+    DIFF_VALIDATED: "El usuario puede comparar texto vigente y propuesto, revisando siempre las fuentes originales.",
+    DIFF_PARTIAL: "El usuario puede ver una comparacion preliminar, pero debe considerar las advertencias antes de interpretarla.",
+    DIFF_AI_ASSISTED: "El usuario puede ver una comparacion asistida, pendiente de revision tecnica o legal.",
+    DIFF_UNRESOLVED: "El usuario puede ver el motivo por el cual no hay comparacion completa y acceder a las fuentes."
+  };
+  return labels[publicStatus] ?? labels.DIFF_UNRESOLVED;
+}
+
+function confidenceForResolution(row, warnings, remoteAssisted) {
+  if (remoteAssisted) {
+    return warnings.length > 0 ? "LOW" : "MEDIUM";
+  }
+  if (warnings.length === 0 && row.confidence === "HIGH") {
+    return "HIGH";
+  }
+  if (warnings.length <= 1 && ["HIGH", "MEDIUM"].includes(row.confidence)) {
+    return "MEDIUM";
+  }
+  return "LOW";
+}
+
+function findArticleInText(text, targetLabel) {
+  const targetNumber = String(targetLabel ?? "").match(/(\d+)/)?.[1];
+  if (!targetNumber) {
+    return null;
+  }
+
+  const articles = segmentArticles(text);
+  return articles.find((article) => article.number === targetNumber) ?? null;
+}
+
+function segmentArticles(text) {
+  const normalized = String(text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const pattern = /(^|\n)\s*(ART[ÍI]CULO|Art\.?)\s+(\d+[°º]?(?:\s*(?:bis|ter|quater))?)\s*[.\-:)]?/gi;
+  const matches = [...normalized.matchAll(pattern)];
+  if (matches.length === 0) {
+    return [];
+  }
+
+  return matches.map((match, index) => {
+    const start = match.index ?? 0;
+    const end = index + 1 < matches.length ? matches[index + 1].index ?? normalized.length : normalized.length;
+    const number = match[3].replace(/[°º]/g, "").trim();
+    return {
+      number,
+      label: `Articulo ${number}`,
+      text: normalized.slice(start, end).trim()
+    };
+  });
+}
+
+function clipTextForDisplay(text, limit = 20000) {
+  const normalized = String(text ?? "").trim();
+  return normalized.length > limit ? `${normalized.slice(0, limit)}\n\n[Texto truncado para visualizacion. Ver fuente original.]` : normalized;
+}
+
+function jobCapabilitiesSatisfied(job, processorCapabilities) {
+  const required = parseArray(job.required_capabilities_json);
+  return required.every((capability) => processorCapabilities.has(capability));
+}
+
+function unique(values) {
+  return [...new Set(arrayValue(values).filter(Boolean))];
+}
+
 function canonicalExpedient(value) {
   const match = String(value ?? "").match(/\b(C\.?\s*D\.?|CD|S|PE)\s*-?\s*(\d{1,6})\s*\/\s*(\d{2,4})\b/i);
   if (!match) {
@@ -1316,8 +2437,13 @@ async function insertArtifacts(db, jobId, processorId, artifacts) {
   }
 }
 
-async function persistStructuredResult(db, jobId, result) {
+async function persistStructuredResult(db, jobId, result, job = null) {
   const timestamp = nowIso();
+
+  if (job?.job_type === "RESOLVE_DIFF_FALLBACK") {
+    await persistFallbackDiffResult(db, job, result);
+    return;
+  }
 
   for (const item of arrayValue(result.affectedLegalItems)) {
     await db
@@ -1546,6 +2672,11 @@ function parseObject(value) {
   } catch {
     return {};
   }
+}
+
+function parseNullableObject(value) {
+  const parsed = parseObject(value);
+  return Object.keys(parsed).length > 0 ? parsed : undefined;
 }
 
 function stringArray(value) {

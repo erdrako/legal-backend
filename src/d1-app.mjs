@@ -4,7 +4,14 @@ import {
   listProposalOverviews,
   searchProposalOverviews
 } from "./change-proposals.mjs";
-import { handleProcessingRoute, isProcessingRoute } from "./processing-queue.mjs";
+import {
+  getStagingChangeProposal,
+  getStagingProposalDiffs,
+  handleProcessingRoute,
+  isProcessingRoute,
+  listStagingChangeProposalOverviews,
+  searchStagingChangeProposalOverviews
+} from "./processing-queue.mjs";
 
 export function createD1App(env) {
   return {
@@ -24,14 +31,16 @@ export function createD1App(env) {
       }
 
       if (url.pathname === "/change-proposals") {
+        const stagingProposals = env?.PROCESSING_DB ? await listStagingChangeProposalOverviews(env.PROCESSING_DB) : [];
         return json(200, {
-          proposals: listProposalOverviews()
+          proposals: mergeProposalOverviews(stagingProposals, listProposalOverviews())
         });
       }
 
       const proposalMatch = url.pathname.match(/^\/change-proposals\/([^/]+)$/);
       if (proposalMatch) {
-        const proposal = getProposal(decodeURIComponent(proposalMatch[1]));
+        const proposalId = decodeURIComponent(proposalMatch[1]);
+        const proposal = (env?.PROCESSING_DB ? await getStagingChangeProposal(env.PROCESSING_DB, proposalId) : null) ?? getProposal(proposalId);
 
         if (!proposal) {
           return json(404, { error: "CHANGE_PROPOSAL_NOT_FOUND" });
@@ -43,13 +52,14 @@ export function createD1App(env) {
       const proposalDiffsMatch = url.pathname.match(/^\/change-proposals\/([^/]+)\/diffs$/);
       if (proposalDiffsMatch) {
         const proposalId = decodeURIComponent(proposalDiffsMatch[1]);
-        const diffs = getProposalDiffs(proposalId);
+        const diffs = env?.PROCESSING_DB ? await getStagingProposalDiffs(env.PROCESSING_DB, proposalId) : getProposalDiffs(proposalId);
+        const fixtureDiffs = getProposalDiffs(proposalId);
 
-        if (!diffs) {
+        if (!diffs && !fixtureDiffs) {
           return json(404, { error: "CHANGE_PROPOSAL_NOT_FOUND" });
         }
 
-        return json(200, { proposalId, diffs });
+        return json(200, { proposalId, diffs: diffs ?? fixtureDiffs });
       }
 
       if (url.pathname === "/search") {
@@ -59,7 +69,8 @@ export function createD1App(env) {
           return json(422, { error: "MISSING_QUERY" });
         }
 
-        const proposals = searchProposalOverviews(query);
+        const stagingProposals = env?.PROCESSING_DB ? await searchStagingChangeProposalOverviews(env.PROCESSING_DB, query) : [];
+        const proposals = mergeProposalOverviews(stagingProposals, searchProposalOverviews(query));
 
         if (!env?.DB) {
           return json(200, {
@@ -272,6 +283,23 @@ async function getOverview(db, id) {
 
 function rows(result) {
   return result?.results ?? [];
+}
+
+function mergeProposalOverviews(primary, secondary) {
+  if (primary.length > 0) {
+    return primary;
+  }
+
+  const byId = new Map();
+  const seenTitles = new Set();
+  for (const proposal of [...primary, ...secondary]) {
+    const titleKey = String(proposal.title ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    if (!byId.has(proposal.id) && !seenTitles.has(titleKey)) {
+      byId.set(proposal.id, proposal);
+      seenTitles.add(titleKey);
+    }
+  }
+  return [...byId.values()];
 }
 
 function json(status, body) {

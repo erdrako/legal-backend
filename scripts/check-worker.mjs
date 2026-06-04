@@ -143,6 +143,17 @@ await assertRequest(
   200,
   async (body) => body.status === "COMPLETED" && body.counters.selected === 0
 );
+await assertRequest(
+  processingApp,
+  {
+    method: "POST",
+    path: "/processing-review/diffs/resolve",
+    token: "admin-token",
+    body: { limit: 5 }
+  },
+  200,
+  async (body) => body.status === "COMPLETED" && body.counters.selected === 0
+);
 
 const enrollment = await requestJson(processingApp, {
   method: "POST",
@@ -342,7 +353,8 @@ function fakeD1({ dataset, overviews }) {
     affectedLegalItems: [],
     extractedProvisions: [],
     changeOperations: [],
-    diffCandidates: []
+    diffCandidates: [],
+    resolvedDiffs: []
   };
 
   return {
@@ -413,6 +425,10 @@ function fakeD1({ dataset, overviews }) {
 
           if (sql.includes("FROM generated_diff_candidates gdc")) {
             return { results: [] };
+          }
+
+          if (sql.includes("FROM resolved_legal_diffs") || sql.includes("resolved_legal_diffs GROUP BY")) {
+            return { results: state.resolvedDiffs };
           }
 
           if (sql.includes("FROM affected_legal_items")) {
@@ -622,8 +638,36 @@ function fakeD1({ dataset, overviews }) {
             return { success: true, meta: { changes: 1 } };
           }
 
+          if (sql.includes("INSERT OR REPLACE INTO resolved_legal_diffs")) {
+            state.resolvedDiffs.push({
+              id: this.values[0],
+              candidate_id: this.values[1],
+              job_id: this.values[2],
+              proposal_id: this.values[3],
+              public_status: this.values[8],
+              change_type: this.values[9],
+              title: this.values[7],
+              validation_warnings_json: this.values[17],
+              source_trace_json: this.values[18],
+              resolver_version: this.values[19],
+              remote_assisted: this.values[20],
+              created_at: this.values[22],
+              updated_at: this.values[23]
+            });
+            return { success: true, meta: { changes: 1 } };
+          }
+
+          if (sql.includes("UPDATE generated_diff_candidates") && sql.includes("review_status")) {
+            return { success: true, meta: { changes: 1 } };
+          }
+
           if (sql.includes("DELETE FROM generated_diff_candidates")) {
             state.diffCandidates = state.diffCandidates.filter((item) => item.job_id !== this.values[0]);
+            return { success: true, meta: { changes: 1 } };
+          }
+
+          if (sql.includes("DELETE FROM resolved_legal_diffs")) {
+            state.resolvedDiffs = [];
             return { success: true, meta: { changes: 1 } };
           }
 
