@@ -81,6 +81,65 @@ Consultas esperadas para esta etapa:
 En Worker, si D1 contiene un dataset bloqueado para lectura publica, la busqueda
 mantiene `proposals` disponible y devuelve `items = []` con `itemsUnavailable`.
 
+## Procesadores remotos
+
+La coordinacion de procesadores remotos usa endpoints privados por pull. El
+procesador corre fuera de Cloudflare, se conecta por HTTPS saliente, toma jobs
+con lease y devuelve resultados estructurados.
+
+Estado de lectura:
+
+```http
+GET /processors/status
+GET /processing-queue?limit=25
+```
+
+`GET /processors/status` devuelve procesadores registrados, estado derivado del
+ultimo heartbeat, tier, modelo, capacidades y job actual.
+
+`GET /processing-queue` devuelve procesadores, conteo por estado y jobs
+recientes. La UI operativa de frontend consume estos endpoints desde
+`ops.html`.
+
+Enrolamiento y ejecucion:
+
+```http
+POST /processors/enroll
+POST /processors/heartbeat
+POST /processors/jobs/claim
+POST /processors/jobs/:id/progress
+POST /processors/jobs/:id/result
+POST /processors/jobs/:id/fail
+POST /processors/jobs/:id/release
+```
+
+`POST /processors/enroll` requiere `Authorization: Bearer
+PROCESSOR_ENROLLMENT_TOKEN` o `PROCESSOR_ADMIN_TOKEN`. Devuelve `processor.id`
+y `processorSecret`; ese secreto vive solo en la maquina del procesador remoto.
+
+Los endpoints de heartbeat/jobs requieren:
+
+```http
+Authorization: Bearer <processorSecret>
+x-processor-id: <processorId>
+```
+
+Creacion administrativa de jobs:
+
+```http
+POST /processing-queue/jobs
+POST /processing-queue/senate-diff-jobs
+```
+
+Estos endpoints requieren `PROCESSOR_ADMIN_TOKEN` o
+`PROCESSOR_ENROLLMENT_TOKEN`. El endpoint `senate-diff-jobs` crea jobs
+`GENERATE_DIFF_CANDIDATES` desde items Senado de `lexmapa-ingestion` en estado
+`needs_review` o `ready_for_validation`, deduplicados por agenda item.
+
+La API no aprueba ni publica diffs automaticamente: los resultados quedan como
+artifacts, normas afectadas, disposiciones extraidas, operaciones y candidatos
+de diff pendientes de validacion.
+
 ## Respuesta esperada
 
 Toda respuesta interpretada debe incluir o permitir navegar hacia:
@@ -139,6 +198,16 @@ DB
 ```
 
 Si el binding no existe, responde `503 D1_BINDING_MISSING`.
+
+Para procesadores remotos puede recibir un binding D1 adicional:
+
+```text
+PROCESSING_DB
+```
+
+En el despliegue Cloudflare actual, `PROCESSING_DB` apunta a
+`lexmapa-ingestion`. El Worker publico solo lo usa para coordinacion operativa
+de procesadores y cola; no lo usa como read model legal aprobado.
 
 ### Politica de dataset
 

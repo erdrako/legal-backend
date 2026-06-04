@@ -4,6 +4,7 @@ import {
   listProposalOverviews,
   searchProposalOverviews
 } from "./change-proposals.mjs";
+import { handleProcessingRoute, isProcessingRoute } from "./processing-queue.mjs";
 
 export function createD1App(env) {
   return {
@@ -12,6 +13,10 @@ export function createD1App(env) {
 
       if (request.method === "OPTIONS") {
         return json(204, {});
+      }
+
+      if (isProcessingRoute(url.pathname)) {
+        return handleProcessingRoute(request, env, json);
       }
 
       if (request.method !== "GET") {
@@ -274,8 +279,8 @@ function json(status, body) {
     status,
     headers: {
       "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET, OPTIONS",
-      "access-control-allow-headers": "content-type",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers": "authorization, content-type, x-processor-id",
       "content-type": "application/json; charset=utf-8"
     }
   });
