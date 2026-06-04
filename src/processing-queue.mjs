@@ -1684,10 +1684,105 @@ async function fetchTextWithTimeout(url, init = {}, timeoutMs = 25_000) {
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-    return response.text();
+    const buffer = await response.arrayBuffer();
+    return decodeHttpText(buffer, response.headers.get("content-type"));
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function decodeHttpText(buffer, contentType) {
+  const bytes = new Uint8Array(buffer);
+  const preview = decodeSingleByte(bytes.slice(0, 4096));
+  const declaredCharset = normalizeCharset(extractCharset(contentType) ?? extractCharset(preview));
+  const preferredCharset = declaredCharset ?? "utf-8";
+  const decoded = decodeBytes(bytes, preferredCharset);
+
+  if (preferredCharset !== "utf-8") {
+    return decoded;
+  }
+
+  const singleByteDecoded = decodeBytes(bytes, "windows-1252");
+  return shouldPreferSingleByteDecode(decoded, singleByteDecoded) ? singleByteDecoded : decoded;
+}
+
+function extractCharset(value) {
+  return String(value ?? "").match(/charset\s*=\s*["']?\s*([a-z0-9._-]+)/i)?.[1] ?? null;
+}
+
+function normalizeCharset(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (["latin1", "latin-1", "iso8859-1", "iso-8859-1", "windows-1252", "cp1252"].includes(normalized)) {
+    return "windows-1252";
+  }
+  if (["utf8", "utf-8"].includes(normalized)) {
+    return "utf-8";
+  }
+  return normalized;
+}
+
+function decodeBytes(bytes, charset) {
+  try {
+    return new TextDecoder(charset, { fatal: false }).decode(bytes);
+  } catch {
+    return charset === "utf-8" ? new TextDecoder().decode(bytes) : decodeSingleByte(bytes);
+  }
+}
+
+function shouldPreferSingleByteDecode(decoded, singleByteDecoded) {
+  const replacementCount = countReplacementCharacters(decoded);
+  if (replacementCount === 0) {
+    return false;
+  }
+  return countReplacementCharacters(singleByteDecoded) < replacementCount;
+}
+
+function countReplacementCharacters(value) {
+  return (String(value ?? "").match(/\uFFFD/g) ?? []).length;
+}
+
+function decodeSingleByte(bytes) {
+  let output = "";
+  for (const byte of bytes) {
+    output += String.fromCharCode(windows1252CodePoint(byte));
+  }
+  return output;
+}
+
+function windows1252CodePoint(byte) {
+  const controls = {
+    0x80: 0x20ac,
+    0x82: 0x201a,
+    0x83: 0x0192,
+    0x84: 0x201e,
+    0x85: 0x2026,
+    0x86: 0x2020,
+    0x87: 0x2021,
+    0x88: 0x02c6,
+    0x89: 0x2030,
+    0x8a: 0x0160,
+    0x8b: 0x2039,
+    0x8c: 0x0152,
+    0x8e: 0x017d,
+    0x91: 0x2018,
+    0x92: 0x2019,
+    0x93: 0x201c,
+    0x94: 0x201d,
+    0x95: 0x2022,
+    0x96: 0x2013,
+    0x97: 0x2014,
+    0x98: 0x02dc,
+    0x99: 0x2122,
+    0x9a: 0x0161,
+    0x9b: 0x203a,
+    0x9c: 0x0153,
+    0x9e: 0x017e,
+    0x9f: 0x0178
+  };
+  return controls[byte] ?? byte;
 }
 
 function htmlToVisibleText(html) {
@@ -1702,25 +1797,36 @@ function htmlToVisibleText(html) {
 }
 
 function decodeHtmlEntities(text) {
-  return text
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&aacute;/gi, "a")
-    .replace(/&eacute;/gi, "e")
-    .replace(/&iacute;/gi, "i")
-    .replace(/&oacute;/gi, "o")
-    .replace(/&uacute;/gi, "u")
-    .replace(/&ntilde;/gi, "n")
-    .replace(/&Aacute;/g, "A")
-    .replace(/&Eacute;/g, "E")
-    .replace(/&Iacute;/g, "I")
-    .replace(/&Oacute;/g, "O")
-    .replace(/&Uacute;/g, "U")
-    .replace(/&Ntilde;/g, "N")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">");
+  const namedEntities = {
+    nbsp: " ",
+    quot: '"',
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    apos: "'",
+    aacute: "\u00e1",
+    eacute: "\u00e9",
+    iacute: "\u00ed",
+    oacute: "\u00f3",
+    uacute: "\u00fa",
+    ntilde: "\u00f1",
+    uuml: "\u00fc",
+    Aacute: "\u00c1",
+    Eacute: "\u00c9",
+    Iacute: "\u00cd",
+    Oacute: "\u00d3",
+    Uacute: "\u00da",
+    Ntilde: "\u00d1",
+    Uuml: "\u00dc",
+    deg: "\u00b0",
+    ordm: "\u00ba",
+    ordf: "\u00aa"
+  };
+
+  return String(text ?? "")
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number.parseInt(code, 10)))
+    .replace(/&([a-z][a-z0-9]+);/gi, (match, name) => namedEntities[name] ?? namedEntities[name.toLowerCase()] ?? match);
 }
 
 function firstMatch(text, pattern) {

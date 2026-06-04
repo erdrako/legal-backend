@@ -170,6 +170,8 @@ Usa InfoLEG por tipo/nro de norma, guarda `current_source_json`, `source_status`
 y, cuando encuentra texto HTML usable, `document_sources`/`document_texts` en
 D1 ingestion. No publica diffs ni aprueba candidatos. El batch esta limitado a
 8 items por invocacion para respetar limites de subrequests de Cloudflare.
+El resolver decodifica HTML por charset declarado o fallback `windows-1252`
+para evitar caracteres rotos en fuentes oficiales legacy.
 
 `POST /processing-review/diffs/resolve` ejecuta el resolver deterministico de
 candidatos de diff. Toma `generated_diff_candidates`, cruza texto propuesto,
