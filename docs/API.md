@@ -92,6 +92,8 @@ Estado de lectura:
 ```http
 GET /processors/status
 GET /processing-queue?limit=25
+GET /detected-projects?limit=50
+GET /processing-review?limit=50
 ```
 
 `GET /processors/status` devuelve procesadores registrados, estado derivado del
@@ -100,6 +102,17 @@ ultimo heartbeat, tier, modelo, capacidades y job actual.
 `GET /processing-queue` devuelve procesadores, conteo por estado y jobs
 recientes. La UI operativa de frontend consume estos endpoints desde
 `ops.html`.
+
+`GET /detected-projects` devuelve items Senado accionables detectados en D1
+ingestion, fuentes asociadas, estado de texto propuesto/vigente, job de
+procesamiento si existe y advertencias de dedupe/parser. Excluye items
+`rejected` para no mezclar descartes operativos con proyectos navegables. No
+publica esos items como reformas aprobadas.
+
+`GET /processing-review` agrega cola, proyectos detectados, jobs pendientes,
+fallidos, `NEEDS_REVIEW`, candidatos de diff, normas afectadas sin texto
+vigente, duplicados y descartes operativos. Es una vista de trabajo para
+`/ops`, no un read model publico.
 
 Enrolamiento y ejecucion:
 
@@ -129,12 +142,17 @@ Creacion administrativa de jobs:
 ```http
 POST /processing-queue/jobs
 POST /processing-queue/senate-diff-jobs
+POST /processing-queue/jobs/:id/retry
 ```
 
 Estos endpoints requieren `PROCESSOR_ADMIN_TOKEN` o
 `PROCESSOR_ENROLLMENT_TOKEN`. El endpoint `senate-diff-jobs` crea jobs
 `GENERATE_DIFF_CANDIDATES` desde items Senado de `lexmapa-ingestion` en estado
 `needs_review` o `ready_for_validation`, deduplicados por agenda item.
+
+`POST /processing-queue/jobs/:id/retry` limpia salidas parciales del job,
+resetea lease/error/progreso y lo devuelve a `PENDING`. Debe usarse desde la UI
+operativa solo con token admin cargado localmente por el operador.
 
 La API no aprueba ni publica diffs automaticamente: los resultados quedan como
 artifacts, normas afectadas, disposiciones extraidas, operaciones y candidatos

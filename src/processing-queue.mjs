@@ -4,11 +4,14 @@ const PROCESSING_ROUTES = [
   "/processors/heartbeat",
   "/processors/jobs/claim",
   "/processing-queue",
+  "/processing-review",
+  "/detected-projects",
   "/processing-queue/jobs",
   "/processing-queue/senate-diff-jobs"
 ];
 
 const JOB_ACTION_PATTERN = /^\/processors\/jobs\/([^/]+)\/(progress|result|fail|release)$/;
+const ADMIN_JOB_ACTION_PATTERN = /^\/processing-queue\/jobs\/([^/]+)\/(retry)$/;
 const CLAIMABLE_STATUSES = new Set(["PENDING", "LEASED", "PROCESSING"]);
 const TERMINAL_RESULT_STATUSES = new Set(["COMPLETED", "NEEDS_REVIEW", "NOT_COMPARABLE"]);
 const DEFAULT_REQUIRED_CAPABILITIES = [
@@ -19,7 +22,7 @@ const DEFAULT_REQUIRED_CAPABILITIES = [
 ];
 
 export function isProcessingRoute(pathname) {
-  return PROCESSING_ROUTES.includes(pathname) || JOB_ACTION_PATTERN.test(pathname);
+  return PROCESSING_ROUTES.includes(pathname) || JOB_ACTION_PATTERN.test(pathname) || ADMIN_JOB_ACTION_PATTERN.test(pathname);
 }
 
 export async function handleProcessingRoute(request, env, json) {
@@ -42,6 +45,14 @@ export async function handleProcessingRoute(request, env, json) {
 
   if (request.method === "GET" && url.pathname === "/processing-queue") {
     return json(200, await queueStatus(db, Number(url.searchParams.get("limit") ?? 25)));
+  }
+
+  if (request.method === "GET" && url.pathname === "/detected-projects") {
+    return json(200, await detectedProjects(db, Number(url.searchParams.get("limit") ?? 50)));
+  }
+
+  if (request.method === "GET" && url.pathname === "/processing-review") {
+    return json(200, await processingReview(db, Number(url.searchParams.get("limit") ?? 50)));
   }
 
   if (request.method === "POST" && url.pathname === "/processors/enroll") {
@@ -92,6 +103,16 @@ export async function handleProcessingRoute(request, env, json) {
     }
 
     return enqueueSenateDiffJobs(request, db, json);
+  }
+
+  const adminJobActionMatch = url.pathname.match(ADMIN_JOB_ACTION_PATTERN);
+  if (request.method === "POST" && adminJobActionMatch) {
+    const admin = await authenticateAdmin(request, env);
+    if (admin.error) {
+      return json(admin.status, admin.error);
+    }
+
+    return retryProcessingJob(db, adminJobActionMatch[1], json);
   }
 
   return json(405, { error: "METHOD_NOT_ALLOWED" });
@@ -587,6 +608,201 @@ async function queueStatus(db, limit) {
   };
 }
 
+async function detectedProjects(db, limit, options = {}) {
+  const includeRejected = options.includeRejected === true;
+  const result = await db
+    .prepare(
+      [
+        "SELECT",
+        "ai.id AS agenda_item_id, ai.chamber, ai.scheduled_at, ai.committees, ai.expedient_number, ai.expedient_origin, ai.expedient_type,",
+        "ai.title, ai.official_description, ai.status AS agenda_status, ai.created_at, ai.updated_at,",
+        "ds.id AS document_source_id, ds.source_role, ds.source_url, ds.source_label, ds.institution, ds.status AS source_status, ds.last_checked_at, ds.notes,",
+        "pj.id AS processing_job_id, pj.status AS processing_status, pj.job_type, pj.attempts, pj.updated_at AS job_updated_at",
+        "FROM agenda_items ai",
+        "LEFT JOIN document_sources ds ON ds.agenda_item_id = ai.id",
+        "LEFT JOIN processing_jobs pj ON pj.dedupe_key = ('senate-diff:' || ai.id)",
+        includeRejected ? "" : "WHERE ai.status != 'rejected'",
+        "ORDER BY ai.created_at DESC, ai.updated_at DESC",
+        "LIMIT ?"
+      ].join(" ")
+    )
+    .bind(clamp(limit, 1, 100) * 12)
+    .all();
+
+  const grouped = new Map();
+  for (const row of rows(result)) {
+    if (!grouped.has(row.agenda_item_id)) {
+      grouped.set(row.agenda_item_id, {
+        id: row.agenda_item_id,
+        chamber: row.chamber,
+        scheduledAt: row.scheduled_at,
+        committees: parseArray(row.committees),
+        expedientNumber: row.expedient_number,
+        expedientOrigin: row.expedient_origin,
+        expedientType: row.expedient_type,
+        canonicalExpedient: canonicalExpedient(row.expedient_number),
+        title: row.title,
+        officialDescription: row.official_description,
+        status: row.agenda_status,
+        duplicateWarning: duplicateExpedientWarning(row.expedient_number),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        processingJob: row.processing_job_id
+          ? {
+              id: row.processing_job_id,
+              status: row.processing_status,
+              jobType: row.job_type,
+              attempts: Number(row.attempts ?? 0),
+              updatedAt: row.job_updated_at
+            }
+          : null,
+        sourceStatuses: {},
+        sources: []
+      });
+    }
+
+    if (row.document_source_id) {
+      const project = grouped.get(row.agenda_item_id);
+      project.sources.push({
+        id: row.document_source_id,
+        role: row.source_role,
+        url: row.source_url,
+        label: row.source_label,
+        institution: row.institution,
+        status: row.source_status,
+        lastCheckedAt: row.last_checked_at,
+        notes: row.notes
+      });
+      project.sourceStatuses[row.source_role] = row.source_status;
+    }
+  }
+
+  const projects = [...grouped.values()].slice(0, clamp(limit, 1, 100));
+  return {
+    generatedAt: nowIso(),
+    counts: detectedProjectCounts(projects),
+    projects
+  };
+}
+
+async function processingReview(db, limit) {
+  const [queue, projects, candidateRows, affectedRows] = await Promise.all([
+    queueStatus(db, Math.min(limit, 50)),
+    detectedProjects(db, Math.min(limit, 50), { includeRejected: true }),
+    db
+      .prepare(
+        [
+          "SELECT",
+          "gdc.id, gdc.job_id, gdc.title, gdc.change_type, gdc.confidence, gdc.review_status, gdc.validation_warnings_json, gdc.updated_at,",
+          "pj.source_label, pj.status AS job_status",
+          "FROM generated_diff_candidates gdc",
+          "LEFT JOIN processing_jobs pj ON pj.id = gdc.job_id",
+          "ORDER BY gdc.updated_at DESC",
+          "LIMIT ?"
+        ].join(" ")
+      )
+      .bind(clamp(limit, 1, 100))
+      .all(),
+    db
+      .prepare(
+        [
+          "SELECT id, job_id, title, reference_text, operation_type, source_status, notes, updated_at",
+          "FROM affected_legal_items",
+          "WHERE source_status IS NULL OR source_status != 'LOADED'",
+          "ORDER BY updated_at DESC",
+          "LIMIT ?"
+        ].join(" ")
+      )
+      .bind(clamp(limit, 1, 100))
+      .all()
+  ]);
+
+  const candidates = rows(candidateRows).map((row) => ({
+    id: row.id,
+    jobId: row.job_id,
+    sourceLabel: row.source_label,
+    jobStatus: row.job_status,
+    title: row.title,
+    changeType: row.change_type,
+    confidence: row.confidence,
+    reviewStatus: row.review_status,
+    validationWarnings: parseArray(row.validation_warnings_json),
+    updatedAt: row.updated_at
+  }));
+
+  const affectedLegalItems = rows(affectedRows).map((row) => ({
+    id: row.id,
+    jobId: row.job_id,
+    title: row.title,
+    referenceText: row.reference_text,
+    operationType: row.operation_type,
+    sourceStatus: row.source_status,
+    notes: row.notes,
+    updatedAt: row.updated_at
+  }));
+
+  return {
+    generatedAt: nowIso(),
+    queue,
+    detectedProjects: projects,
+    review: {
+      pendingJobs: queue.jobs.filter((job) => ["PENDING", "LEASED", "PROCESSING"].includes(job.status)),
+      failedJobs: queue.jobs.filter((job) => job.status === "FAILED"),
+      needsReviewJobs: queue.jobs.filter((job) => job.status === "NEEDS_REVIEW"),
+      notComparableJobs: queue.jobs.filter((job) => job.status === "NOT_COMPARABLE"),
+      duplicateProjects: projects.projects.filter((project) => project.duplicateWarning),
+      candidates,
+      affectedLegalItems
+    }
+  };
+}
+
+async function retryProcessingJob(db, jobId, json) {
+  const existing = await getJob(db, jobId);
+  if (!existing) {
+    return json(404, { error: "PROCESSING_JOB_NOT_FOUND" });
+  }
+
+  await db
+    .prepare(
+      [
+        "DELETE FROM generated_diff_candidates",
+        "WHERE job_id = ?",
+        "OR operation_id IN (SELECT id FROM change_operations WHERE job_id = ?)",
+        "OR affected_legal_item_id IN (SELECT id FROM affected_legal_items WHERE job_id = ?)"
+      ].join(" ")
+    )
+    .bind(jobId, jobId, jobId)
+    .run();
+  await db.prepare("DELETE FROM change_operations WHERE job_id = ?").bind(jobId).run();
+  await db.prepare("DELETE FROM affected_legal_items WHERE job_id = ?").bind(jobId).run();
+  await db.prepare("DELETE FROM extracted_provisions WHERE job_id = ?").bind(jobId).run();
+  await db.prepare("DELETE FROM processing_artifacts WHERE job_id = ?").bind(jobId).run();
+
+  const timestamp = nowIso();
+  await db
+    .prepare(
+      [
+        "UPDATE processing_jobs",
+        "SET status = 'PENDING', result_json = NULL, error_json = NULL, progress_json = NULL,",
+        "lease_owner_id = NULL, lease_until = NULL, completed_at = NULL, failed_at = NULL, updated_at = ?",
+        "WHERE id = ?"
+      ].join(" ")
+    )
+    .bind(timestamp, jobId)
+    .run();
+
+  await insertAttempt(db, {
+    jobId,
+    processorId: null,
+    status: "PENDING",
+    message: "Job reset by operator for retry.",
+    metadata: { action: "retry" }
+  });
+
+  return json(200, { job: toJobDto(await getJob(db, jobId)) });
+}
+
 function statusCounts(countRows) {
   const counts = {
     PENDING: 0,
@@ -605,6 +821,87 @@ function statusCounts(countRows) {
   }
 
   return counts;
+}
+
+function detectedProjectCounts(projects) {
+  const counts = {
+    total: projects.length,
+    needsReview: 0,
+    readyForValidation: 0,
+    published: 0,
+    rejected: 0,
+    duplicates: 0,
+    proposedTextLoaded: 0,
+    currentTextLoaded: 0,
+    currentTextPending: 0
+  };
+
+  for (const project of projects) {
+    if (project.status === "needs_review") {
+      counts.needsReview += 1;
+    }
+    if (project.status === "ready_for_validation") {
+      counts.readyForValidation += 1;
+    }
+    if (project.status === "published") {
+      counts.published += 1;
+    }
+    if (project.status === "rejected") {
+      counts.rejected += 1;
+    }
+    if (project.duplicateWarning) {
+      counts.duplicates += 1;
+    }
+    if (project.sourceStatuses.PROPOSED_TEXT === "LOADED") {
+      counts.proposedTextLoaded += 1;
+    }
+    if (project.sourceStatuses.CURRENT_TEXT === "LOADED") {
+      counts.currentTextLoaded += 1;
+    }
+    if (["PENDING", "NEEDS_REVIEW"].includes(project.sourceStatuses.CURRENT_TEXT)) {
+      counts.currentTextPending += 1;
+    }
+  }
+
+  return counts;
+}
+
+function canonicalExpedient(value) {
+  const match = String(value ?? "").match(/\b(C\.?\s*D\.?|CD|S|PE)\s*-?\s*(\d{1,6})\s*\/\s*(\d{2,4})\b/i);
+  if (!match) {
+    return null;
+  }
+
+  const origin = normalizeExpedientOrigin(match[1]);
+  const number = Number(match[2]);
+  const year = match[3].length === 4 ? match[3].slice(-2) : match[3];
+  return `${origin}-${number}/${year}`;
+}
+
+function duplicateExpedientWarning(value) {
+  const text = String(value ?? "");
+  const canonical = canonicalExpedient(text);
+  if (!canonical) {
+    return null;
+  }
+
+  return text !== canonical
+    ? `Expediente no canonico: se detecto ${text}, se esperaba ${canonical}.`
+    : null;
+}
+
+function normalizeExpedientOrigin(value) {
+  const normalized = String(value ?? "").replace(/\s|\./g, "").toUpperCase();
+  if (normalized.startsWith("CD")) {
+    return "CD";
+  }
+  if (normalized.startsWith("S")) {
+    return "S";
+  }
+  if (normalized.startsWith("PE")) {
+    return "PE";
+  }
+  return normalized;
 }
 
 async function touchProcessorIdle(db, processorId, timestamp) {

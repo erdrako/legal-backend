@@ -116,6 +116,22 @@ await assertRequest(
   200,
   async (body) => body.counts.PENDING === 0 && Array.isArray(body.processors)
 );
+await assertRequest(
+  processingApp,
+  {
+    path: "/detected-projects"
+  },
+  200,
+  async (body) => Array.isArray(body.projects) && body.counts.total === 0
+);
+await assertRequest(
+  processingApp,
+  {
+    path: "/processing-review"
+  },
+  200,
+  async (body) => body.queue.counts.PENDING === 0 && Array.isArray(body.review.candidates)
+);
 
 const enrollment = await requestJson(processingApp, {
   method: "POST",
@@ -237,6 +253,16 @@ await assertRequest(
   },
   200,
   async (body) => body.counts.COMPLETED === 1 && body.jobs[0]?.status === "COMPLETED"
+);
+await assertRequest(
+  processingApp,
+  {
+    method: "POST",
+    path: `/processing-queue/jobs/${createdJob.body.job.id}/retry`,
+    token: "admin-token"
+  },
+  200,
+  async (body) => body.job.status === "PENDING"
 );
 
 console.log("Worker D1 checks passed.");
@@ -370,6 +396,18 @@ function fakeD1({ dataset, overviews }) {
             };
           }
 
+          if (sql.includes("FROM agenda_items ai")) {
+            return { results: [] };
+          }
+
+          if (sql.includes("FROM generated_diff_candidates gdc")) {
+            return { results: [] };
+          }
+
+          if (sql.includes("FROM affected_legal_items")) {
+            return { results: [] };
+          }
+
           if (sql.includes("WHERE lower")) {
             const query = this.values[0].replaceAll("%", "").toLowerCase();
             return {
@@ -489,7 +527,7 @@ function fakeD1({ dataset, overviews }) {
             return { success: true, meta: { changes: 1 } };
           }
 
-          if (sql.includes("UPDATE processing_jobs") && sql.includes("result_json")) {
+          if (sql.includes("UPDATE processing_jobs") && sql.includes("result_json") && !sql.includes("result_json = NULL")) {
             const job = state.jobs.find((item) => item.id === this.values[4]);
             Object.assign(job, {
               status: this.values[0],
@@ -502,7 +540,7 @@ function fakeD1({ dataset, overviews }) {
             return { success: true, meta: { changes: 1 } };
           }
 
-          if (sql.includes("UPDATE processing_jobs") && sql.includes("error_json")) {
+          if (sql.includes("UPDATE processing_jobs") && sql.includes("error_json") && !sql.includes("error_json = NULL")) {
             const job = state.jobs.find((item) => item.id === this.values[3]);
             Object.assign(job, {
               status: "FAILED",
@@ -570,6 +608,31 @@ function fakeD1({ dataset, overviews }) {
 
           if (sql.includes("INSERT OR REPLACE INTO generated_diff_candidates")) {
             state.diffCandidates.push({ id: this.values[0] });
+            return { success: true, meta: { changes: 1 } };
+          }
+
+          if (sql.includes("DELETE FROM generated_diff_candidates")) {
+            state.diffCandidates = state.diffCandidates.filter((item) => item.job_id !== this.values[0]);
+            return { success: true, meta: { changes: 1 } };
+          }
+
+          if (sql.includes("DELETE FROM change_operations")) {
+            state.changeOperations = [];
+            return { success: true, meta: { changes: 1 } };
+          }
+
+          if (sql.includes("DELETE FROM affected_legal_items")) {
+            state.affectedLegalItems = [];
+            return { success: true, meta: { changes: 1 } };
+          }
+
+          if (sql.includes("DELETE FROM extracted_provisions")) {
+            state.extractedProvisions = [];
+            return { success: true, meta: { changes: 1 } };
+          }
+
+          if (sql.includes("DELETE FROM processing_artifacts")) {
+            state.artifacts = [];
             return { success: true, meta: { changes: 1 } };
           }
 
