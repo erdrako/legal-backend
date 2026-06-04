@@ -132,6 +132,17 @@ await assertRequest(
   200,
   async (body) => body.queue.counts.PENDING === 0 && Array.isArray(body.review.candidates)
 );
+await assertRequest(
+  processingApp,
+  {
+    method: "POST",
+    path: "/processing-review/affected-items/resolve-current-sources",
+    token: "admin-token",
+    body: { limit: 5 }
+  },
+  200,
+  async (body) => body.status === "COMPLETED" && body.counters.selected === 0
+);
 
 const enrollment = await requestJson(processingApp, {
   method: "POST",

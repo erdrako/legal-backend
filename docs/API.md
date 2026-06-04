@@ -114,6 +114,14 @@ fallidos, `NEEDS_REVIEW`, candidatos de diff, normas afectadas sin texto
 vigente, duplicados y descartes operativos. Es una vista de trabajo para
 `/ops`, no un read model publico.
 
+Las normas afectadas pueden incluir:
+
+- `canonicalReferenceText`;
+- `detectionEvidence`;
+- `reviewReason`;
+- `currentSource`;
+- `sourceResolvedAt`.
+
 Enrolamiento y ejecucion:
 
 ```http
@@ -143,6 +151,7 @@ Creacion administrativa de jobs:
 POST /processing-queue/jobs
 POST /processing-queue/senate-diff-jobs
 POST /processing-queue/jobs/:id/retry
+POST /processing-review/affected-items/resolve-current-sources
 ```
 
 Estos endpoints requieren `PROCESSOR_ADMIN_TOKEN` o
@@ -153,6 +162,13 @@ Estos endpoints requieren `PROCESSOR_ADMIN_TOKEN` o
 `POST /processing-queue/jobs/:id/retry` limpia salidas parciales del job,
 resetea lease/error/progreso y lo devuelve a `PENDING`. Debe usarse desde la UI
 operativa solo con token admin cargado localmente por el operador.
+
+`POST /processing-review/affected-items/resolve-current-sources` resuelve de
+forma on-demand fuentes vigentes oficiales para `affected_legal_items` pendientes.
+Usa InfoLEG por tipo/nro de norma, guarda `current_source_json`, `source_status`
+y, cuando encuentra texto HTML usable, `document_sources`/`document_texts` en
+D1 ingestion. No publica diffs ni aprueba candidatos. El batch esta limitado a
+8 items por invocacion para respetar limites de subrequests de Cloudflare.
 
 La API no aprueba ni publica diffs automaticamente: los resultados quedan como
 artifacts, normas afectadas, disposiciones extraidas, operaciones y candidatos

@@ -5,6 +5,7 @@ const PROCESSING_ROUTES = [
   "/processors/jobs/claim",
   "/processing-queue",
   "/processing-review",
+  "/processing-review/affected-items/resolve-current-sources",
   "/detected-projects",
   "/processing-queue/jobs",
   "/processing-queue/senate-diff-jobs"
@@ -103,6 +104,15 @@ export async function handleProcessingRoute(request, env, json) {
     }
 
     return enqueueSenateDiffJobs(request, db, json);
+  }
+
+  if (request.method === "POST" && url.pathname === "/processing-review/affected-items/resolve-current-sources") {
+    const admin = await authenticateAdmin(request, env);
+    if (admin.error) {
+      return json(admin.status, admin.error);
+    }
+
+    return resolveAffectedCurrentSources(request, db, json);
   }
 
   const adminJobActionMatch = url.pathname.match(ADMIN_JOB_ACTION_PATTERN);
@@ -706,9 +716,11 @@ async function processingReview(db, limit) {
     db
       .prepare(
         [
-          "SELECT id, job_id, title, reference_text, operation_type, source_status, notes, updated_at",
+          "SELECT id, job_id, proposal_id, legal_item_id, title, reference_text, canonical_reference_text, operation_type,",
+          "current_source_json, source_status, detection_evidence_json, review_reason, notes, source_resolved_at, updated_at",
           "FROM affected_legal_items",
-          "WHERE source_status IS NULL OR source_status != 'LOADED'",
+          "WHERE (source_status IS NULL OR source_status != 'LOADED')",
+          "AND (legal_item_type = 'LAW' OR title LIKE 'Ley %' OR reference_text LIKE '%Ley%')",
           "ORDER BY updated_at DESC",
           "LIMIT ?"
         ].join(" ")
@@ -733,11 +745,18 @@ async function processingReview(db, limit) {
   const affectedLegalItems = rows(affectedRows).map((row) => ({
     id: row.id,
     jobId: row.job_id,
+    proposalId: row.proposal_id,
+    legalItemId: row.legal_item_id,
     title: row.title,
     referenceText: row.reference_text,
+    canonicalReferenceText: row.canonical_reference_text,
     operationType: row.operation_type,
+    currentSource: parseObject(row.current_source_json),
     sourceStatus: row.source_status,
+    detectionEvidence: parseObject(row.detection_evidence_json),
+    reviewReason: row.review_reason,
     notes: row.notes,
+    sourceResolvedAt: row.source_resolved_at,
     updatedAt: row.updated_at
   }));
 
@@ -801,6 +820,338 @@ async function retryProcessingJob(db, jobId, json) {
   });
 
   return json(200, { job: toJobDto(await getJob(db, jobId)) });
+}
+
+async function resolveAffectedCurrentSources(request, db, json) {
+  const body = await readJson(request);
+  const ids = stringArray(body.affectedLegalItemIds).slice(0, 8);
+  const limit = clamp(Number(body.limit ?? 8), 1, 8);
+  const items = await listAffectedItemsForCurrentSourceResolution(db, { ids, limit });
+  const counters = {
+    requested: ids.length || limit,
+    selected: items.length,
+    resolved: 0,
+    pending: 0,
+    needsReview: 0,
+    failed: 0,
+    errors: []
+  };
+
+  for (const item of items) {
+    const lawNumber = lawNumberFromAffectedItem(item);
+    if (!lawNumber) {
+      counters.needsReview += 1;
+      await markAffectedItemCurrentSource(db, item.id, {
+        status: "NEEDS_REVIEW",
+        reviewReason: "No se pudo extraer numero de ley desde la referencia detectada.",
+        currentSource: {
+          status: "NEEDS_REVIEW",
+          resolver: "infoleg-current-law@1",
+          retrievedAt: nowIso()
+        }
+      });
+      continue;
+    }
+
+    try {
+      const resolution = await resolveInfolegCurrentLaw(lawNumber);
+      if (!resolution) {
+        counters.pending += 1;
+        await markAffectedItemCurrentSource(db, item.id, {
+          status: "PENDING",
+          reviewReason: `No se encontro fuente vigente oficial para Ley ${lawNumber}.`,
+          currentSource: {
+            status: "PENDING",
+            lawNumber,
+            resolver: "infoleg-current-law@1",
+            retrievedAt: nowIso()
+          }
+        });
+        continue;
+      }
+
+      await persistAffectedCurrentSource(db, item, resolution);
+      counters.resolved += 1;
+    } catch (error) {
+      counters.failed += 1;
+      counters.errors.push({ affectedLegalItemId: item.id, message: readableError(error) });
+      await markAffectedItemCurrentSource(db, item.id, {
+        status: "NEEDS_REVIEW",
+        reviewReason: `Fallo la resolucion de fuente vigente: ${readableError(error)}`,
+        currentSource: {
+          status: "NEEDS_REVIEW",
+          lawNumber,
+          resolver: "infoleg-current-law@1",
+          retrievedAt: nowIso()
+        }
+      });
+    }
+  }
+
+  return json(200, {
+    job: "resolve-affected-current-sources",
+    generatedAt: nowIso(),
+    status: counters.failed > 0 ? "COMPLETED_WITH_ERRORS" : "COMPLETED",
+    counters
+  });
+}
+
+async function listAffectedItemsForCurrentSourceResolution(db, { ids, limit }) {
+  if (ids.length > 0) {
+    const placeholders = ids.map(() => "?").join(", ");
+    const result = await db
+      .prepare(
+        [
+          "SELECT * FROM affected_legal_items",
+          `WHERE id IN (${placeholders})`,
+          "ORDER BY updated_at DESC",
+          "LIMIT ?"
+        ].join(" ")
+      )
+      .bind(...ids, limit)
+      .all();
+    return rows(result);
+  }
+
+  const result = await db
+    .prepare(
+      [
+        "SELECT * FROM affected_legal_items",
+        "WHERE source_status IN ('PENDING', 'NEEDS_REVIEW')",
+        "AND (legal_item_type = 'LAW' OR title LIKE 'Ley %' OR reference_text LIKE '%Ley%')",
+        "ORDER BY updated_at DESC",
+        "LIMIT ?"
+      ].join(" ")
+    )
+    .bind(limit)
+    .all();
+  return rows(result);
+}
+
+async function persistAffectedCurrentSource(db, item, resolution) {
+  const timestamp = nowIso();
+  const currentSource = {
+    status: "LOADED",
+    role: "CURRENT_TEXT",
+    lawNumber: resolution.lawNumber,
+    label: `Texto vigente oficial - Ley ${resolution.lawNumber}`,
+    institution: "InfoLEG / Ministerio de Justicia",
+    sourceUrl: resolution.textUrl,
+    sourceKind: resolution.sourceKind,
+    infolegId: resolution.infolegId,
+    contentHash: resolution.contentHash,
+    retrievedAt: timestamp,
+    resolver: "infoleg-current-law@1",
+    official: true
+  };
+
+  await markAffectedItemCurrentSource(db, item.id, {
+    status: "LOADED",
+    reviewReason:
+      "Fuente vigente oficial resuelta automaticamente. Requiere matching articulo por articulo y validacion antes de publicarse.",
+    currentSource,
+    timestamp
+  });
+
+  if (!item.proposal_id) {
+    return;
+  }
+
+  const documentSourceId = `document-source-current-${await sha256Hex(`${item.proposal_id}\n${resolution.textUrl}`)}`;
+  await db
+    .prepare(
+      [
+        "INSERT OR REPLACE INTO document_sources",
+        "(id, agenda_item_id, proposal_id, source_role, source_url, source_label, institution, official, mime_type, status, content_hash, last_checked_at, notes, created_at, updated_at)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      ].join(" ")
+    )
+    .bind(
+      documentSourceId,
+      item.proposal_id,
+      item.proposal_id,
+      "CURRENT_TEXT",
+      resolution.textUrl,
+      `Texto vigente oficial - Ley ${resolution.lawNumber}`,
+      "InfoLEG / Ministerio de Justicia",
+      1,
+      "text/html",
+      "LOADED",
+      resolution.contentHash,
+      timestamp,
+      `Resuelto on-demand desde affected_legal_items por ${currentSource.resolver}. URL de ficha: ${resolution.normUrl}`,
+      timestamp,
+      timestamp
+    )
+    .run();
+
+  await db
+    .prepare(
+      [
+        "INSERT OR REPLACE INTO document_texts",
+        "(id, document_source_id, extracted_text, normalized_text, extraction_method, parser_version, extraction_quality, content_hash, created_at, updated_at)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      ].join(" ")
+    )
+    .bind(
+      `document-text-${await sha256Hex(documentSourceId)}`,
+      documentSourceId,
+      resolution.normalizedText,
+      resolution.normalizedText,
+      "htmlTextExtractor@backend",
+      "infoleg-current-law@1",
+      "MEDIUM",
+      resolution.contentHash,
+      timestamp,
+      timestamp
+    )
+    .run();
+}
+
+async function markAffectedItemCurrentSource(db, id, { status, reviewReason, currentSource, timestamp = nowIso() }) {
+  await db
+    .prepare(
+      [
+        "UPDATE affected_legal_items",
+        "SET source_status = ?, current_source_json = ?, review_reason = ?, source_resolved_at = ?, updated_at = ?",
+        "WHERE id = ?"
+      ].join(" ")
+    )
+    .bind(status, JSON.stringify(currentSource ?? {}), nullableString(reviewReason), timestamp, timestamp, id)
+    .run();
+}
+
+function lawNumberFromAffectedItem(item) {
+  const text = [item.canonical_reference_text, item.title, item.reference_text, item.legal_item_id]
+    .filter(Boolean)
+    .join(" ");
+  const match = text.match(/\b(?:ley\s*)?(\d{1,3})\.?(\d{3})\b/i);
+  if (!match) {
+    return null;
+  }
+
+  return `${Number(match[1])}${match[2]}`;
+}
+
+async function resolveInfolegCurrentLaw(lawNumber) {
+  const searchBody = new URLSearchParams({
+    tipoNorma: "1",
+    numero: lawNumber,
+    anioSancion: "",
+    texto: "",
+    dependencia: "",
+    rama: "",
+    fechaPublicacion: "",
+    fechaPublicacionHasta: ""
+  });
+  const searchHtml = await fetchTextWithTimeout("https://servicios.infoleg.gob.ar/infolegInternet/buscarNormas.do", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "user-agent": "lexmapa-source-resolver/0.1"
+    },
+    body: searchBody.toString()
+  });
+  const infolegId = firstMatch(searchHtml, /verNorma\.do(?:;[^"?]+)?\?id=(\d+)/i);
+  if (!infolegId) {
+    return null;
+  }
+
+  const normUrl = `https://servicios.infoleg.gob.ar/infolegInternet/verNorma.do?id=${infolegId}`;
+  const normHtml = await fetchTextWithTimeout(normUrl, {
+    headers: { "user-agent": "lexmapa-source-resolver/0.1" }
+  });
+  const normPath = firstMatch(normHtml, /(anexos\/\d+-\d+\/\d+\/norma\.htm)/i);
+  if (!normPath) {
+    return null;
+  }
+
+  const normaUrl = `https://servicios.infoleg.gob.ar/infolegInternet/${normPath}`;
+  const texactUrl = normaUrl.replace(/\/norma\.htm$/i, "/texact.htm");
+  const texact = await fetchInfolegDocument(texactUrl);
+  const norma = await fetchInfolegDocument(normaUrl);
+  const selected = texact.usable ? { ...texact, sourceKind: "TEXTO_ACTUALIZADO" } : { ...norma, sourceKind: "NORMA_ORIGINAL" };
+  if (!selected.usable) {
+    return null;
+  }
+
+  return {
+    lawNumber,
+    infolegId,
+    normUrl,
+    textUrl: selected.url,
+    sourceKind: selected.sourceKind,
+    normalizedText: selected.normalizedText,
+    contentHash: await sha256Hex(`infoleg-current-law@1\n${selected.normalizedText}`)
+  };
+}
+
+async function fetchInfolegDocument(url) {
+  try {
+    const html = await fetchTextWithTimeout(url, {
+      headers: { "user-agent": "lexmapa-source-resolver/0.1" }
+    });
+    const normalizedText = htmlToVisibleText(html);
+    return {
+      url,
+      normalizedText,
+      usable: normalizedText.length > 500 && !/error|no encontrado|not found/i.test(normalizedText.slice(0, 300))
+    };
+  } catch {
+    return { url, normalizedText: "", usable: false };
+  }
+}
+
+async function fetchTextWithTimeout(url, init = {}, timeoutMs = 25_000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return response.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function htmlToVisibleText(html) {
+  return decodeHtmlEntities(
+    String(html ?? "")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
+}
+
+function decodeHtmlEntities(text) {
+  return text
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&aacute;/gi, "a")
+    .replace(/&eacute;/gi, "e")
+    .replace(/&iacute;/gi, "i")
+    .replace(/&oacute;/gi, "o")
+    .replace(/&uacute;/gi, "u")
+    .replace(/&ntilde;/gi, "n")
+    .replace(/&Aacute;/g, "A")
+    .replace(/&Eacute;/g, "E")
+    .replace(/&Iacute;/g, "I")
+    .replace(/&Oacute;/g, "O")
+    .replace(/&Uacute;/g, "U")
+    .replace(/&Ntilde;/g, "N")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
+function firstMatch(text, pattern) {
+  return String(text ?? "").match(pattern)?.[1] ?? null;
 }
 
 function statusCounts(countRows) {
@@ -885,9 +1236,22 @@ function duplicateExpedientWarning(value) {
     return null;
   }
 
-  return text !== canonical
+  return text !== canonical && !isRepeatedCanonicalExpedient(text, canonical)
     ? `Expediente no canonico: se detecto ${text}, se esperaba ${canonical}.`
     : null;
+}
+
+function isRepeatedCanonicalExpedient(value, canonical) {
+  const canonicalMatch = canonical.match(/^(CD|S|PE)-(\d{1,6})\/(\d{2,4})$/i);
+  if (!canonicalMatch) {
+    return false;
+  }
+
+  const normalized = String(value ?? "").replace(/\s|\./g, "").toUpperCase();
+  const origin = canonicalMatch[1].toUpperCase();
+  const number = Number(canonicalMatch[2]);
+  const year = canonicalMatch[3].length === 4 ? canonicalMatch[3].slice(-2) : canonicalMatch[3];
+  return normalized === `${origin}-${number}/${year}-${number}/${year}`;
 }
 
 function normalizeExpedientOrigin(value) {
@@ -960,8 +1324,9 @@ async function persistStructuredResult(db, jobId, result) {
       .prepare(
         [
           "INSERT OR REPLACE INTO affected_legal_items",
-          "(id, job_id, proposal_id, legal_item_id, title, legal_item_type, reference_text, operation_type, current_source_json, source_status, affected_provision_ids_json, notes, created_at, updated_at)",
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+          "(id, job_id, proposal_id, legal_item_id, title, legal_item_type, reference_text, canonical_reference_text, operation_type,",
+          "current_source_json, source_status, affected_provision_ids_json, detection_evidence_json, review_reason, notes, created_at, updated_at)",
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ].join(" ")
       )
       .bind(
@@ -972,10 +1337,13 @@ async function persistStructuredResult(db, jobId, result) {
         stringValue(item.title, "Norma afectada pendiente"),
         nullableString(item.legalItemType),
         stringValue(item.referenceText, ""),
+        nullableString(item.canonicalReferenceText),
         stringValue(item.operationType, "NEEDS_REVIEW"),
         JSON.stringify(item.currentSource ?? {}),
         stringValue(item.sourceStatus, "PENDING"),
         JSON.stringify(arrayValue(item.affectedProvisionIds)),
+        JSON.stringify(item.detectionEvidence ?? {}),
+        nullableString(item.reviewReason),
         nullableString(item.notes),
         timestamp,
         timestamp
@@ -1196,6 +1564,10 @@ function stringValue(value, fallback) {
 function nullableString(value) {
   const normalized = String(value ?? "").trim();
   return normalized || null;
+}
+
+function readableError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isHttpUrl(value) {
