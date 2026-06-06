@@ -14,8 +14,8 @@ export function getProposalDiffs(id, bundle = changeProposalBundle) {
 }
 
 export function searchProposalOverviews(query, bundle = changeProposalBundle) {
-  const terms = queryTerms(query);
-  const normalizedQuery = normalize(query);
+  const normalizedQuery = normalizeSearchQuery(query);
+  const terms = queryTerms(normalizedQuery);
 
   return bundle.proposals
     .map((proposal) => buildProposalSearchResult(proposal, normalizedQuery, terms))
@@ -114,6 +114,13 @@ function buildProposalSearchResult(proposal, normalizedQuery, terms) {
 
   return {
     ...toProposalOverview(proposal),
+    resultKind: classifySearchResult({
+      proposal,
+      normalizedQuery,
+      matchedDiffIds,
+      matchedTopicIds,
+      matchedGroupIds
+    }),
     matchedDiffIds,
     matchedTopicIds,
     matchedGroupIds,
@@ -124,6 +131,20 @@ function buildProposalSearchResult(proposal, normalizedQuery, terms) {
     }),
     score
   };
+}
+
+function classifySearchResult({ proposal, normalizedQuery, matchedDiffIds, matchedTopicIds, matchedGroupIds }) {
+  const title = normalize(proposal.title);
+  const aliases = (proposal.queryExamples ?? []).map(normalize);
+  if (normalizedQuery && (title.includes(normalizedQuery) || aliases.some((alias) => alias.includes(normalizedQuery)))) {
+    return "direct";
+  }
+
+  if (matchedTopicIds.length > 0 && matchedDiffIds.length === 0 && matchedGroupIds.length === 0) {
+    return "topic";
+  }
+
+  return "related";
 }
 
 function diffSearchText(diff) {
@@ -201,6 +222,10 @@ function queryTerms(query) {
       .map((term) => term.trim())
       .filter((term) => term.length > 2 && !STOP_WORDS.has(term))
   );
+}
+
+function normalizeSearchQuery(query) {
+  return normalize(String(query ?? "").slice(0, 180));
 }
 
 function termVariants(term) {

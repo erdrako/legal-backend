@@ -66,7 +66,16 @@ La busqueda devuelve:
 - `proposals`: propuestas o reformas que coinciden con la pregunta. Para cada
   resultado incluye `matchedDiffIds`, `matchedTopicIds`, `matchedGroupIds` y
   `matchSummary` cuando la pregunta permite orientar el resultado.
+- `resultKind`: clasificacion de certeza para renderizar UX publica sin
+  duplicar responsabilidades en frontend:
+  - `direct`
+  - `related`
+  - `topic`
+  - `source`
 - `items`: items legales aprobados disponibles, si el dataset permite lectura.
+
+La query se trata como entrada no confiable. Debe estar presente, recortarse a
+un largo razonable y nunca interpolarse en SQL sin prepared statements.
 
 Consultas esperadas para esta etapa:
 

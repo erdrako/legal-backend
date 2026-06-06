@@ -83,6 +83,7 @@ await assertResponse(
   async (body) =>
     body.proposals[0]?.id === "biocombustibles" &&
     Array.isArray(body.proposals[0].matchedDiffIds) &&
+    ["direct", "related", "topic"].includes(body.proposals[0].resultKind) &&
     body.items.length === 0 &&
     body.itemsUnavailable.error === "DATASET_NOT_APPROVED"
 );

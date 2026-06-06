@@ -35,7 +35,8 @@ assertResponse(
   (body) =>
     Array.isArray(body.proposals) &&
     body.proposals[0]?.id === "ley-hojarasca" &&
-    Array.isArray(body.proposals[0].matchedDiffIds)
+    Array.isArray(body.proposals[0].matchedDiffIds) &&
+    body.proposals[0].resultKind === "direct"
 );
 assertResponse(
   "/search?q=biocombustibles",
@@ -43,6 +44,7 @@ assertResponse(
   (body) =>
     body.proposals[0]?.id === "biocombustibles" &&
     Array.isArray(body.proposals[0]?.matchedTopicIds) &&
+    ["direct", "related", "topic"].includes(body.proposals[0]?.resultKind) &&
     body.proposals[0]?.matchSummary
 );
 assertResponse(

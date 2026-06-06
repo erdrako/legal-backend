@@ -61,7 +61,7 @@ export function createApp(approvedBundle) {
       }
 
       if (url.pathname === "/search") {
-        const query = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+        const query = normalizeSearchQuery(url.searchParams.get("q"));
 
         if (!query) {
           return json(422, { error: "MISSING_QUERY" });
@@ -108,6 +108,10 @@ export function createApp(approvedBundle) {
       return json(404, { error: "NOT_FOUND" });
     }
   };
+}
+
+function normalizeSearchQuery(value) {
+  return String(value ?? "").trim().toLowerCase().slice(0, 180);
 }
 
 function datasetStatusFor(approvedBundle) {

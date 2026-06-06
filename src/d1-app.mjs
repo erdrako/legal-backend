@@ -63,7 +63,7 @@ export function createD1App(env) {
       }
 
       if (url.pathname === "/search") {
-        const query = (url.searchParams.get("q") ?? "").trim();
+        const query = normalizeSearchQuery(url.searchParams.get("q"));
 
         if (!query) {
           return json(422, { error: "MISSING_QUERY" });
@@ -270,6 +270,10 @@ async function searchOverviews(db, query) {
     .all();
 
   return rows(result).map((row) => JSON.parse(row.overview_json));
+}
+
+function normalizeSearchQuery(value) {
+  return String(value ?? "").trim().slice(0, 180);
 }
 
 async function getOverview(db, id) {

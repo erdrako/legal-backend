@@ -744,10 +744,15 @@ export async function getStagingProposalDiffs(db, proposalId) {
 }
 
 export async function searchStagingChangeProposalOverviews(db, query, limit = 50) {
-  const terms = queryTerms(query);
+  const normalizedQuery = normalizeSearchText(String(query ?? "").slice(0, 180));
+  const terms = queryTerms(normalizedQuery);
   const proposals = await listStagingChangeProposalOverviews(db, limit);
   return proposals
     .map((proposal) => {
+      const titleText = normalizeSearchText(proposal.title);
+      const topicText = normalizeSearchText((proposal.affectedTopics ?? []).join(" "));
+      const groupText = normalizeSearchText((proposal.affectedGroups ?? []).join(" "));
+      const sourceText = normalizeSearchText([proposal.source?.name, proposal.source?.sourceUrl].join(" "));
       const haystack = normalizeSearchText(
         [
           proposal.title,
@@ -763,6 +768,14 @@ export async function searchStagingChangeProposalOverviews(db, query, limit = 50
       return score > 0
         ? {
             ...proposal,
+            resultKind: classifyStagingSearchResult({
+              normalizedQuery,
+              terms,
+              titleText,
+              topicText,
+              groupText,
+              sourceText
+            }),
             matchedDiffIds: [],
             matchedTopicIds: [],
             matchedGroupIds: [],
@@ -774,6 +787,26 @@ export async function searchStagingChangeProposalOverviews(db, query, limit = 50
     .filter(Boolean)
     .sort((left, right) => right.score - left.score)
     .map(({ score, ...proposal }) => proposal);
+}
+
+function classifyStagingSearchResult({ normalizedQuery, terms, titleText, topicText, groupText, sourceText }) {
+  if (normalizedQuery && titleText.includes(normalizedQuery)) {
+    return "direct";
+  }
+
+  if (terms.length > 0 && terms.some((term) => topicText.includes(term))) {
+    return "topic";
+  }
+
+  if (terms.length > 0 && terms.some((term) => sourceText.includes(term))) {
+    return "source";
+  }
+
+  if (terms.length > 0 && terms.some((term) => groupText.includes(term))) {
+    return "related";
+  }
+
+  return "related";
 }
 
 async function processingReview(db, limit) {
